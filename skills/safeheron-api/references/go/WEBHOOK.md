@@ -47,8 +47,8 @@ import (
 )
 
 webhookConverter := webhook.WebhookConverter{Config: webhook.WebHookConfig{
-    SafeheronWebHookRsaPublicKey: "pems/safeheron_webhook_public.pem",
-    WebHookRsaPrivateKey:         "pems/webhook_private.pem",
+    SafeheronWebHookRsaPublicKey: "${SAFEHERON_WEBHOOK_RSA_PUBLIC_KEY_PATH}",
+    WebHookRsaPrivateKey:         "${WEBHOOK_RSA_PRIVATE_PATH}",
 }}
 
 // Decrypt and verify webhook payload
@@ -83,8 +83,8 @@ var webhookConverter webhook.WebhookConverter
 
 func init() {
     webhookConverter = webhook.WebhookConverter{Config: webhook.WebHookConfig{
-        SafeheronWebHookRsaPublicKey: "pems/safeheron_webhook_public.pem",
-        WebHookRsaPrivateKey:         "pems/webhook_private.pem",
+		SafeheronWebHookRsaPublicKey: "${SAFEHERON_WEBHOOK_RSA_PUBLIC_KEY_PATH}",
+		WebHookRsaPrivateKey:         "${WEBHOOK_RSA_PRIVATE_PATH}",
     }}
 }
 

@@ -48,8 +48,8 @@ import { readFileSync } from 'fs';
 import path from 'path';
 
 const webhookConfig: SafeheronWebHookConfig = {
-  webHookRsaPrivateKey: readFileSync(path.resolve('./keys/webhook_private.pem'), 'utf8'),
-  safeheronWebHookRsaPublicKey: readFileSync(path.resolve('./keys/safeheron_webhook_public.pem'), 'utf8'),
+  webHookRsaPrivateKey: '${WEBHOOK_RSA_PRIVATE_KEY}',//todo Replace with the WebHook RSA private key you read from Vault/KMS
+  safeheronWebHookRsaPublicKey: '${SAFEHERON_WEBHOOK_RSA_PUBLIC_KEY}',//todo Replace with the Safeheron WebHook RSA public key from Safeheron Console
 };
 
 const converter = new WebHookConverter(webhookConfig);

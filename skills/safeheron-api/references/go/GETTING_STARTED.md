@@ -95,70 +95,20 @@ go get github.com/shopspring/decimal
 
 ---
 
-## Step 4 -- Configure Environment & Inject Credentials
+## Step 4 -- Inject Credentials
 
 **Never hardcode credentials in source code.**
 
-### Option A -- Environment Variables (Recommended)
-
-```bash
-export SAFEHERON_API_KEY="your-api-key-here"
-export SAFEHERON_BASE_URL="https://api.safeheron.vip"
-export SAFEHERON_PRIVATE_KEY_PATH="/secure/path/api_private.pem"
-export SAFEHERON_PUBLIC_KEY_PATH="/secure/path/safeheron_public.pem"
-```
-
-Load in Go:
-
 ```go
-sc := safeheron.Client{Config: safeheron.ApiConfig{
-    BaseUrl:               os.Getenv("SAFEHERON_BASE_URL"),
-    ApiKey:                os.Getenv("SAFEHERON_API_KEY"),
-    RsaPrivateKey:         os.Getenv("SAFEHERON_PRIVATE_KEY_PATH"),
-    SafeheronRsaPublicKey: os.Getenv("SAFEHERON_PUBLIC_KEY_PATH"),
-    RequestTimeout:        20000,
-}}
-```
-
-### Option B -- Config File (Development Only)
-
-Create `config.yaml` outside your source tree (never committed):
-
-```yaml
-baseUrl: "https://api.safeheron.vip"
-apiKey: "your-api-key"
-privateKeyPemFile: "pems/api_private.pem"
-safeheronPublicKeyPemFile: "pems/safeheron_public.pem"
-requestTimeout: 20000
-```
-
-Load with viper:
-
-```go
-import (
-    "fmt"
-    "github.com/Safeheron/safeheron-api-sdk-go/safeheron"
-    "github.com/spf13/viper"
-)
-
-viper.SetConfigFile("config.yaml")
-if err := viper.ReadInConfig(); err != nil {
-    panic(fmt.Errorf("error reading config file, %w", err))
-}
+import "github.com/Safeheron/safeheron-api-sdk-go/safeheron"
 
 sc := safeheron.Client{Config: safeheron.ApiConfig{
-    BaseUrl:               viper.GetString("baseUrl"),
-    ApiKey:                viper.GetString("apiKey"),
-    RsaPrivateKey:         viper.GetString("privateKeyPemFile"),
-    SafeheronRsaPublicKey: viper.GetString("safeheronPublicKeyPemFile"),
-    RequestTimeout:        viper.GetInt64("requestTimeout"),
+    BaseUrl:               "https://api.safeheron.vip",
+    ApiKey:                "${SAFEHERON_API_KEY}",
+    RsaPrivateKey:         "${RSA_PRIVATE_KEY_PATH}",
+    SafeheronRsaPublicKey: "${SAFEHERON_PUBLIC_KEY_PATH}",
+    RequestTimeout:        20000,                        // milliseconds
 }}
-```
-
-Add to `.gitignore`:
-```
-config.yaml
-*.pem
 ```
 
 ### Common Mistakes
@@ -189,10 +139,10 @@ import (
 func main() {
     // -- Step 1: Build client --
     sc := safeheron.Client{Config: safeheron.ApiConfig{
-        BaseUrl:               os.Getenv("SAFEHERON_BASE_URL"),
-        ApiKey:                os.Getenv("SAFEHERON_API_KEY"),
-        RsaPrivateKey:         os.Getenv("SAFEHERON_PRIVATE_KEY_PATH"),
-        SafeheronRsaPublicKey: os.Getenv("SAFEHERON_PUBLIC_KEY_PATH"),
+		BaseUrl:               "https://api.safeheron.vip",
+		ApiKey:                "${SAFEHERON_API_KEY}",
+		RsaPrivateKey:         "${RSA_PRIVATE_KEY_PATH}",
+		SafeheronRsaPublicKey: "${SAFEHERON_PUBLIC_KEY_PATH}",
         RequestTimeout:        20000,
     }}
 
