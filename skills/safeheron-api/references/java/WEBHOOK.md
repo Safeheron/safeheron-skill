@@ -45,18 +45,9 @@ Webhook payloads use the **same AES+RSA encryption scheme** as API responses. Th
 @Configuration
 public class SafeheronWebhookConfig {
 
-    // Safeheron platform public key — from Web Console → Settings → API → Webhook
-    @Value("${safeheron.webhook.platform-public-key}")
-    private String safeheronWebHookRsaPublicKey;
-
-    // Your own RSA private key — paired with the public key uploaded to Console
-    @Value("${webhook.rsa-private-key}")
-    private String webHookRsaPrivateKey;
-
     @Bean
     public WebhookConverter webhookConverter() {
-        // PEM headers (-----BEGIN PUBLIC KEY-----) are stripped automatically by the SDK
-        return new WebhookConverter(safeheronWebHookRsaPublicKey, webHookRsaPrivateKey);
+        return new WebhookConverter("${SAFEHERON_WEBHOOK_RSA_PUBLIC_KEY}", "${WEBHOOK_RSA_PRIVATE_KEY}");//todo Replace with the WebHook RSA private key you read from Vault/KMS and replace with the Safeheron WebHook RSA public key from Safeheron Console
     }
 }
 ```

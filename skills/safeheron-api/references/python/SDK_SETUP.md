@@ -16,25 +16,31 @@ pip install -e .
 
 ---
 
-## Config File (config.yaml)
+## Key Generation (OpenSSL)
 
-```yaml
-apiKey: 080d****e06e60
-privateKey: MIIJRQIBA*******DtGRBdennqu8g95jcrMxCUhsifVgzP6vUyg==
-safeheronPublicKey: MIICI****QuTOTECAwEAAQ==
-baseUrl: https://api.safeheron.vip
-requestTimeout: 20000
+```bash
+# Generate RSA 4096-bit private key
+openssl genpkey -out api_private.pem -algorithm RSA -pkeyopt rsa_keygen_bits:4096
+
+# Export public key
+openssl rsa -in api_private.pem -out api_public.pem -pubout
+
+# Convert to PKCS8 (required for SDK's privateKey field)
+openssl pkcs8 -topk8 -inform PEM -outform PEM -nocrypt -in api_private.pem -out api_pkcs8.pem
 ```
 
 ## Loading Config Programmatically
 
 ```python
-import yaml
+import os
 
-with open("config.yaml", "r") as f:
-    config = yaml.safe_load(f)
-
-# config is a dict with keys: apiKey, privateKey, safeheronPublicKey, baseUrl, requestTimeout
+config = {
+    'apiKey': '${SAFEHERON_API_KEY}',#todo Replace with the API Key you read from Safeheron Console
+    'privateKey': '${RSA_PRIVATE_KEY}', #todo Replace with the RSA private key you read from Vault/KMS
+    'safeheronPublicKey': '${SAFEHERON_PLATFORM_PUBLIC_KEY}',#todo Replace with the Safeheron platform public key from Safeheron Console
+    'baseUrl': 'https://api.safeheron.vip',
+    'requestTimeout': 20000,
+}
 ```
 
 ## Config Dict Field Names
@@ -93,66 +99,3 @@ account_key = resp['accountKey']
 ```
 
 ---
-
-## Flask Integration
-
-```python
-import yaml
-from flask import Flask
-from safeheron_api_sdk_python.api.account_api import AccountApi
-from safeheron_api_sdk_python.api.transaction_api import TransactionApi
-
-app = Flask(__name__)
-
-with open("config.yaml", "r") as f:
-    config = yaml.safe_load(f)
-
-account_api = AccountApi(config)
-transaction_api = TransactionApi(config)
-```
-
----
-
-## Environment Variables (Recommended for Production)
-
-```python
-import os
-
-config = {
-    'apiKey': os.environ['SAFEHERON_API_KEY'],
-    'privateKey': os.environ['SAFEHERON_RSA_PRIVATE_KEY'],
-    'safeheronPublicKey': os.environ['SAFEHERON_PLATFORM_PUBLIC_KEY'],
-    'baseUrl': 'https://api.safeheron.vip',
-    'requestTimeout': 20000,
-}
-```
-
----
-
-## Key Generation (OpenSSL)
-
-```bash
-# Generate RSA 4096-bit private key
-openssl genpkey -out api_private.pem -algorithm RSA -pkeyopt rsa_keygen_bits:4096
-
-# Export public key
-openssl rsa -in api_private.pem -out api_public.pem -pubout
-
-# Convert to PKCS8 (required for SDK's privateKey field)
-openssl pkcs8 -topk8 -inform PEM -outform PEM -nocrypt -in api_private.pem -out api_pkcs8.pem
-```
-
-Use the base64 content of `api_pkcs8.pem` (strip `-----BEGIN/END-----` headers) as `privateKey`.
-Upload `api_public.pem` contents (strip headers) as your RSA public key in Safeheron Console.
-
-Alternatively, you can use `privateKeyPemFile` and point it to the PEM file path directly:
-
-```python
-config = {
-    'apiKey': 'your-api-key',
-    'privateKeyPemFile': '/path/to/api_pkcs8.pem',
-    'safeheronPublicKey': 'MIICIjANBgkqhkiG9w0BAQEFAAOCAQ8A...',
-    'baseUrl': 'https://api.safeheron.vip',
-    'requestTimeout': 20000,
-}
-```

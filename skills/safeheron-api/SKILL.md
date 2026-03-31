@@ -22,7 +22,7 @@ Covers all 5 onboarding steps:
 1. Generate RSA key pair
 2. Configure API account in Safeheron Console
 3. Add SDK to project dependencies
-4. Configure environment & inject credentials
+4. Inject credentials
 5. First API request
 
 ---
@@ -90,12 +90,12 @@ Covers all 5 onboarding steps:
 
 - **SDK:**
 
-| Language | Install |
-|----------|---------|
-| Java | `com.safeheron:api-sdk-java:1.0.10` (Maven) |
-| JS/TS | `npm install @safeheron/api-sdk` |
+| Language | Install                                            |
+|----------|----------------------------------------------------|
+| Java | `com.safeheron:api-sdk-java:1.0.12` (Maven)        |
+| JS/TS | `npm install @safeheron/api-sdk`                   |
 | Go | `go get github.com/Safeheron/safeheron-api-sdk-go` |
-| Python | `pip install safeheron-api-sdk-python` |
+| Python | `pip install safeheron-api-sdk-python`             |
 
 - **SDK Repos**: [Java](https://github.com/Safeheron/safeheron-api-sdk-java) | [JS/TS](https://github.com/Safeheron/safeheron-api-sdk-js) | [Go](https://github.com/Safeheron/safeheron-api-sdk-go) | [Python](https://github.com/Safeheron/safeheron-api-sdk-python)
 - **API Docs**: https://docs.safeheron.com/api/en.html

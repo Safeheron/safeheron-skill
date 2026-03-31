@@ -5,7 +5,7 @@
 <dependency>
     <groupId>com.safeheron</groupId>
     <artifactId>api-sdk-java</artifactId>
-    <version>1.0.10</version>
+    <version>1.0.12</version>
 </dependency>
 ```
 
@@ -18,28 +18,14 @@ mvn install -Dmaven.test.skip=true
 
 ---
 
-## Config File (config.yaml)
-```yaml
-apiKey: 080d****e06e60
-privateKey: MIIJRQIBA*******DtGRBdennqu8g95jcrMxCUhsifVgzP6vUyg==
-safeheronPublicKey: MIICI****QuTOTECAwEAAQ==
-baseUrl: https://api.safeheron.vip
-requestTimeout: 20000
-```
-
 ## Loading Config Programmatically (as in official test code)
 ```java
-Yaml yaml = new Yaml();
-File file = new File("src/test/resources/demo/api/account/config.yaml");
-InputStream inputStream = new FileInputStream(file);
-Map<String, Object> config = yaml.load(inputStream);
-
 SafeheronConfig safeheronConfig = SafeheronConfig.builder()
-        .baseUrl(config.get("baseUrl").toString())
-        .apiKey(config.get("apiKey").toString())
-        .safeheronRsaPublicKey(config.get("safeheronPublicKey").toString())
-        .rsaPrivateKey(config.get("privateKey").toString())
-        .requestTimeout(Long.valueOf(config.get("requestTimeout").toString()))
+        .baseUrl("https://api.safeheron.vip")
+        .apiKey("${SAFEHERON_API_KEY}")//todo Replace with the API Key you read from Safeheron Console
+        .rsaPrivateKey("${RSA_PRIVATE_KEY}")//todo Replace with the RSA private key you read from Vault/KMS
+        .safeheronRsaPublicKey("${SAFEHERON_PLATFORM_PUBLIC_KEY}")//todo Replace with the Safeheron platform public key from Safeheron Console
+        .requestTimeout(20000L)
         .build();
 ```
 
@@ -80,54 +66,6 @@ CreateAccountResponse resp = ServiceExecutor.execute(accountApi.createAccount(re
 
 // WRONG — never call the interface method directly without ServiceExecutor
 // CreateAccountResponse resp = accountApi.createAccount(req);  // ❌
-```
-
----
-
-## Spring Boot Integration
-```java
-@Configuration
-public class SafeheronConfiguration {
-
-    @Bean
-    public SafeheronConfig safeheronConfig(
-            @Value("${safeheron.baseUrl}") String baseUrl,
-            @Value("${safeheron.apiKey}") String apiKey,
-            @Value("${safeheron.rsaPrivateKey}") String rsaPrivateKey,
-            @Value("${safeheron.safeheronRsaPublicKey}") String safeheronRsaPublicKey) {
-        return SafeheronConfig.builder()
-                .baseUrl(baseUrl)
-                .apiKey(apiKey)
-                .rsaPrivateKey(rsaPrivateKey)
-                .safeheronRsaPublicKey(safeheronRsaPublicKey)
-                .requestTimeout(20000L)
-                .build();
-    }
-
-    @Bean
-    public AccountApiService accountApiService(SafeheronConfig config) {
-        return ServiceCreator.create(AccountApiService.class, config);
-    }
-
-    @Bean
-    public TransactionApiService transactionApiService(SafeheronConfig config) {
-        return ServiceCreator.create(TransactionApiService.class, config);
-    }
-
-    @Bean
-    public MPCSignApiService mpcSignApiService(SafeheronConfig config) {
-        return ServiceCreator.create(MPCSignApiService.class, config);
-    }
-}
-```
-
-```yaml
-# application.yml
-safeheron:
-  baseUrl: https://api.safeheron.vip
-  apiKey: ${SAFEHERON_API_KEY}
-  rsaPrivateKey: ${SAFEHERON_RSA_PRIVATE_KEY}
-  safeheronRsaPublicKey: ${SAFEHERON_PLATFORM_PUBLIC_KEY}
 ```
 
 ---

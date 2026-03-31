@@ -21,12 +21,11 @@
 ### Code Pattern -- Loading Credentials
 
 ```go
-// CORRECT: Load from environment variable (dev/test)
 sc := safeheron.Client{Config: safeheron.ApiConfig{
-    BaseUrl:               os.Getenv("SAFEHERON_BASE_URL"),
-    ApiKey:                os.Getenv("SAFEHERON_API_KEY"),
-    RsaPrivateKey:         os.Getenv("SAFEHERON_PRIVATE_KEY_PATH"),
-    SafeheronRsaPublicKey: os.Getenv("SAFEHERON_PUBLIC_KEY_PATH"),
+    BaseUrl:               "https://api.safeheron.vip",
+    ApiKey:                "${SAFEHERON_API_KEY}",
+    RsaPrivateKey:         "${RSA_PRIVATE_KEY_PATH}",
+    SafeheronRsaPublicKey: "${SAFEHERON_PUBLIC_KEY_PATH}",
     RequestTimeout:        20000,
 }}
 

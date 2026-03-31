@@ -50,7 +50,7 @@ grep -v "BEGIN\|END" api_public.pem | tr -d '\n'
 grep -v "BEGIN\|END" api_pkcs8.pem | tr -d '\n'
 ```
 
-> **Security:** Never commit private key files to version control. Inject them via environment variables or a secrets manager.
+> **Security:** Never commit private key files to version control. Inject them via a secrets manager.
 
 ---
 
@@ -103,7 +103,7 @@ Add to `pom.xml`:
 <dependency>
     <groupId>com.safeheron</groupId>
     <artifactId>api-sdk-java</artifactId>
-    <version>1.0.10</version>
+    <version>1.0.12</version>
 </dependency>
 ```
 
@@ -123,7 +123,7 @@ Add to `build.gradle`:
 
 ```groovy
 dependencies {
-    implementation 'com.safeheron:api-sdk-java:1.0.10'
+    implementation 'com.safeheron:api-sdk-java:1.0.12'
 }
 ```
 
@@ -131,7 +131,7 @@ Or for `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.safeheron:api-sdk-java:1.0.10")
+    implementation("com.safeheron:api-sdk-java:1.0.12")
 }
 ```
 
@@ -147,136 +147,20 @@ mvn install -Dmaven.test.skip=true
 
 ---
 
-## Step 4 -- Configure Environment & Inject Credentials
+## Step 4 -- Inject Credentials
 
 **Never hardcode credentials in source code.**
 
 Choose one of the following approaches based on your project type.
 
-### Option A — Environment Variables (Recommended)
-
-Set environment variables on your server or in your CI/CD pipeline:
-
-```bash
-export SAFEHERON_API_KEY="your-api-key-here"
-export SAFEHERON_RSA_PRIVATE_KEY="MIIJQgIBADANBgkqhkiG9w0BAQEFAASC..."
-export SAFEHERON_PLATFORM_PUBLIC_KEY="MIICIjANBgkqhkiG9w0BAQEFAAOCAQ8A..."
-```
-
-Load in Java:
-
 ```java
 SafeheronConfig config = SafeheronConfig.builder()
     .baseUrl("https://api.safeheron.vip")
-    .apiKey(System.getenv("SAFEHERON_API_KEY"))
-    .rsaPrivateKey(System.getenv("SAFEHERON_RSA_PRIVATE_KEY"))
-    .safeheronRsaPublicKey(System.getenv("SAFEHERON_PLATFORM_PUBLIC_KEY"))
+    .apiKey("${SAFEHERON_API_KEY}")//todo Replace with the API Key you read from Safeheron Console
+    .rsaPrivateKey("${RSA_PRIVATE_KEY}")//todo Replace with the RSA private key you read from Vault/KMS
+    .safeheronRsaPublicKey("${SAFEHERON_PLATFORM_PUBLIC_KEY}")//todo Replace with the Safeheron platform public key from Safeheron Console
     .requestTimeout(20000L)
     .build();
-```
-
-### Option B — Spring Boot application.yml
-
-`application.yml`:
-
-```yaml
-safeheron:
-  baseUrl: https://api.safeheron.vip
-  apiKey: ${SAFEHERON_API_KEY}
-  rsaPrivateKey: ${SAFEHERON_RSA_PRIVATE_KEY}
-  safeheronRsaPublicKey: ${SAFEHERON_PLATFORM_PUBLIC_KEY}
-  requestTimeout: 20000
-```
-
-Spring Boot configuration class:
-
-```java
-@Configuration
-public class SafeheronConfiguration {
-
-    @Bean
-    public SafeheronConfig safeheronConfig(
-            @Value("${safeheron.baseUrl}") String baseUrl,
-            @Value("${safeheron.apiKey}") String apiKey,
-            @Value("${safeheron.rsaPrivateKey}") String rsaPrivateKey,
-            @Value("${safeheron.safeheronRsaPublicKey}") String safeheronRsaPublicKey,
-            @Value("${safeheron.requestTimeout:20000}") long requestTimeout) {
-        return SafeheronConfig.builder()
-                .baseUrl(baseUrl)
-                .apiKey(apiKey)
-                .rsaPrivateKey(rsaPrivateKey)
-                .safeheronRsaPublicKey(safeheronRsaPublicKey)
-                .requestTimeout(requestTimeout)
-                .build();
-    }
-
-    @Bean
-    public AccountApiService accountApiService(SafeheronConfig config) {
-        return ServiceCreator.create(AccountApiService.class, config);
-    }
-
-    @Bean
-    public TransactionApiService transactionApiService(SafeheronConfig config) {
-        return ServiceCreator.create(TransactionApiService.class, config);
-    }
-
-    @Bean
-    public MPCSignApiService mpcSignApiService(SafeheronConfig config) {
-        return ServiceCreator.create(MPCSignApiService.class, config);
-    }
-
-    @Bean
-    public Web3ApiService web3ApiService(SafeheronConfig config) {
-        return ServiceCreator.create(Web3ApiService.class, config);
-    }
-
-    @Bean
-    public WhitelistApiService whitelistApiService(SafeheronConfig config) {
-        return ServiceCreator.create(WhitelistApiService.class, config);
-    }
-
-    @Bean
-    public CoinApiService coinApiService(SafeheronConfig config) {
-        return ServiceCreator.create(CoinApiService.class, config);
-    }
-}
-```
-
-### Option C — Local Config File (Development Only)
-
-Create `config.yaml` outside your source tree (never committed):
-
-```yaml
-apiKey: "your-api-key"
-privateKey: "MIIJQgIBADANBgkqhkiG9w0BAQEFAASC..."    # PKCS8 base64, no headers
-safeheronPublicKey: "MIICIjANBgkqhkiG9w0BAQEFAAOCAQ8A..."  # Platform public key
-baseUrl: "https://api.safeheron.vip"
-requestTimeout: 20000
-```
-
-Load it:
-
-```java
-import org.yaml.snakeyaml.Yaml;
-import java.io.FileInputStream;
-import java.util.Map;
-
-Yaml yaml = new Yaml();
-Map<String, Object> cfg = yaml.load(new FileInputStream("config.yaml"));
-
-SafeheronConfig config = SafeheronConfig.builder()
-        .baseUrl(cfg.get("baseUrl").toString())
-        .apiKey(cfg.get("apiKey").toString())
-        .safeheronRsaPublicKey(cfg.get("safeheronPublicKey").toString())
-        .rsaPrivateKey(cfg.get("privateKey").toString())
-        .requestTimeout(Long.valueOf(cfg.get("requestTimeout").toString()))
-        .build();
-```
-
-Add to `.gitignore`:
-```
-config.yaml
-*.pem
 ```
 
 ### ⚠️ SafeheronConfig Builder — Common Mistakes
@@ -318,9 +202,9 @@ public class SafeheronQuickStart {
         // ── Step 1: Build config ──────────────────────────────────────────
         SafeheronConfig config = SafeheronConfig.builder()
                 .baseUrl("https://api.safeheron.vip")
-                .apiKey(System.getenv("SAFEHERON_API_KEY"))
-                .rsaPrivateKey(System.getenv("SAFEHERON_RSA_PRIVATE_KEY"))
-                .safeheronRsaPublicKey(System.getenv("SAFEHERON_PLATFORM_PUBLIC_KEY"))
+                .apiKey("${SAFEHERON_API_KEY}")//todo Replace with the API Key you read from Safeheron Console
+                .rsaPrivateKey("${RSA_PRIVATE_KEY}")//todo Replace with the RSA private key you read from Vault/KMS
+                .safeheronRsaPublicKey("${SAFEHERON_PLATFORM_PUBLIC_KEY}")//todo Replace with the Safeheron platform public key from Safeheron Console
                 .requestTimeout(20000L)
                 .build();
 

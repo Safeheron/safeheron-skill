@@ -30,9 +30,9 @@ import { SafeheronConfig } from '@safeheron/api-sdk';
 
 const config: SafeheronConfig = {
   baseUrl: 'https://api.safeheron.vip',
-  apiKey: 'your-api-key',
-  rsaPrivateKey: 'your-pkcs8-private-key-pem-string',
-  safeheronRsaPublicKey: 'safeheron-platform-public-key-pem-string',
+  apiKey: '${SAFEHERON_API_KEY}',//todo Replace with the API Key you read from Safeheron Console
+  rsaPrivateKey: '${RSA_PRIVATE_KEY}', //todo Replace with the RSA private key you read from Vault/KMS
+  safeheronRsaPublicKey: '${SAFEHERON_PLATFORM_PUBLIC_KEY}',//todo Replace with the Safeheron platform public key from Safeheron Console
   requestTimeout: 20000,  // milliseconds
 };
 ```
@@ -46,35 +46,6 @@ const config: SafeheronConfig = {
 | `rsaPrivateKey` | `string` | Your RSA private key, PEM string or `file:/path/to/key.pem` |
 | `safeheronRsaPublicKey` | `string` | Safeheron platform public key, PEM string or `file:/path/to/key.pem` |
 | `requestTimeout` | `number` | Request timeout in milliseconds |
-
-### Two Ways to Provide RSA Keys
-
-**Option A -- PEM string directly:**
-
-```typescript
-import { readFileSync } from 'fs';
-import path from 'path';
-
-const config: SafeheronConfig = {
-  baseUrl: 'https://api.safeheron.vip',
-  apiKey: process.env.SAFEHERON_API_KEY!,
-  rsaPrivateKey: readFileSync(path.resolve('./keys/api_pkcs8.pem'), 'utf8'),
-  safeheronRsaPublicKey: readFileSync(path.resolve('./keys/safeheron_public.pem'), 'utf8'),
-  requestTimeout: 20000,
-};
-```
-
-**Option B -- Environment variables:**
-
-```typescript
-const config: SafeheronConfig = {
-  baseUrl: 'https://api.safeheron.vip',
-  apiKey: process.env.SAFEHERON_API_KEY!,
-  rsaPrivateKey: process.env.SAFEHERON_RSA_PRIVATE_KEY!,
-  safeheronRsaPublicKey: process.env.SAFEHERON_PLATFORM_PUBLIC_KEY!,
-  requestTimeout: 20000,
-};
-```
 
 ---
 

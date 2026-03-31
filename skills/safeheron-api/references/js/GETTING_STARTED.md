@@ -38,7 +38,7 @@ After running these commands, you will have:
 | `api_public.pem` | Public key | **Upload to Safeheron Console** |
 | `api_pkcs8.pem` | PKCS8-encoded private key | **Set in SDK config as `rsaPrivateKey`** |
 
-> **Security:** Never commit private key files to version control. Inject them via environment variables or a secrets manager.
+> **Security:** Never commit private key files to version control. Inject them via a secrets manager.
 
 ---
 
@@ -105,54 +105,20 @@ npm install && npm run build
 
 ---
 
-## Step 4 -- Configure Environment & Inject Credentials
+## Step 4 -- Inject Credentials
 
 **Never hardcode credentials in source code.**
-
-### Option A -- Environment Variables (Recommended)
-
-Set environment variables on your server or in your CI/CD pipeline:
-
-```bash
-export SAFEHERON_API_KEY="your-api-key-here"
-export SAFEHERON_RSA_PRIVATE_KEY="$(cat api_pkcs8.pem)"
-export SAFEHERON_PLATFORM_PUBLIC_KEY="$(cat safeheron_public.pem)"
-```
-
-Load in TypeScript:
 
 ```typescript
 import { SafeheronConfig } from '@safeheron/api-sdk';
 
 const config: SafeheronConfig = {
   baseUrl: 'https://api.safeheron.vip',
-  apiKey: process.env.SAFEHERON_API_KEY!,
-  rsaPrivateKey: process.env.SAFEHERON_RSA_PRIVATE_KEY!,
-  safeheronRsaPublicKey: process.env.SAFEHERON_PLATFORM_PUBLIC_KEY!,
-  requestTimeout: 20000,
+  apiKey: '${SAFEHERON_API_KEY}',//todo Replace with the API Key you read from Safeheron Console
+  rsaPrivateKey: '${RSA_PRIVATE_KEY}', //todo Replace with the RSA private key you read from Vault/KMS
+  safeheronRsaPublicKey: '${SAFEHERON_PLATFORM_PUBLIC_KEY}',//todo Replace with the Safeheron platform public key from Safeheron Console
+  requestTimeout: 20000,  // milliseconds
 };
-```
-
-### Option B -- Read from PEM Files (Development Only)
-
-```typescript
-import { readFileSync } from 'fs';
-import path from 'path';
-
-const config: SafeheronConfig = {
-  baseUrl: 'https://api.safeheron.vip',
-  apiKey: process.env.SAFEHERON_API_KEY!,
-  rsaPrivateKey: readFileSync(path.resolve('./keys/api_pkcs8.pem'), 'utf8'),
-  safeheronRsaPublicKey: readFileSync(path.resolve('./keys/safeheron_public.pem'), 'utf8'),
-  requestTimeout: 20000,
-};
-```
-
-Add to `.gitignore`:
-
-```
-*.pem
-.env
 ```
 
 ### Common Config Mistakes
@@ -179,9 +145,9 @@ async function main() {
   // -- Step 1: Build config --
   const config: SafeheronConfig = {
     baseUrl: 'https://api.safeheron.vip',
-    apiKey: process.env.SAFEHERON_API_KEY!,
-    rsaPrivateKey: process.env.SAFEHERON_RSA_PRIVATE_KEY!,
-    safeheronRsaPublicKey: process.env.SAFEHERON_PLATFORM_PUBLIC_KEY!,
+    apiKey: '${SAFEHERON_API_KEY}',//todo Replace with the API Key you read from Safeheron Console
+    rsaPrivateKey: '${RSA_PRIVATE_KEY}', //todo Replace with the RSA private key you read from Vault/KMS
+    safeheronRsaPublicKey: '${SAFEHERON_PLATFORM_PUBLIC_KEY}',//todo Replace with the Safeheron platform public key from Safeheron Console
     requestTimeout: 20000,
   };
 

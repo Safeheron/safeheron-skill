@@ -23,11 +23,10 @@
 ```python
 import os
 
-# CORRECT: Load from environment variable (dev/test)
 config = {
-    'apiKey': os.environ['SAFEHERON_API_KEY'],
-    'privateKey': os.environ['SAFEHERON_RSA_PRIVATE_KEY'],
-    'safeheronPublicKey': os.environ['SAFEHERON_PLATFORM_PUBLIC_KEY'],
+    'apiKey': '${SAFEHERON_API_KEY}',#todo Replace with the API Key you read from Safeheron Console
+    'privateKey': '${RSA_PRIVATE_KEY}', #todo Replace with the RSA private key you read from Vault/KMS
+    'safeheronPublicKey': '${SAFEHERON_PLATFORM_PUBLIC_KEY}',#todo Replace with the Safeheron platform public key from Safeheron Console
     'baseUrl': 'https://api.safeheron.vip',
     'requestTimeout': 20000,
 }
@@ -224,7 +223,7 @@ Call the transaction query API periodically to catch missed events.
 
 | Area | Key Rule |
 |---|---|
-| Private keys | KMS/Vault only; never plaintext |
+| Private keys | Vault/KMS only; never plaintext |
 | Transfer addresses | Whitelist required; ONE_TIME_ADDRESS only for truly one-off payments |
 | AML check | Mandatory before every outbound transfer via ToolsApi |
 | Address validation | Mandatory before whitelist add or transfer via CoinApi.check_coin_address() |

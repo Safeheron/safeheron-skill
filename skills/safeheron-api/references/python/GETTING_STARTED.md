@@ -50,7 +50,7 @@ grep -v "BEGIN\|END" api_public.pem | tr -d '\n'
 grep -v "BEGIN\|END" api_pkcs8.pem | tr -d '\n'
 ```
 
-> **Security:** Never commit private key files to version control. Inject them via environment variables or a secrets manager.
+> **Security:** Never commit private key files to version control. Inject them via a secrets manager.
 
 ---
 
@@ -117,61 +117,20 @@ pip install -e .
 
 ---
 
-## Step 4 -- Configure Environment & Inject Credentials
+## Step 4 -- Inject Credentials
 
 **Never hardcode credentials in source code.**
-
-Choose one of the following approaches.
-
-### Option A -- Environment Variables (Recommended)
-
-Set environment variables on your server or in your CI/CD pipeline:
-
-```bash
-export SAFEHERON_API_KEY="your-api-key-here"
-export SAFEHERON_RSA_PRIVATE_KEY="MIIJQgIBADANBgkqhkiG9w0BAQEFAASC..."
-export SAFEHERON_PLATFORM_PUBLIC_KEY="MIICIjANBgkqhkiG9w0BAQEFAAOCAQ8A..."
-```
-
-Load in Python:
 
 ```python
 import os
 
 config = {
-    'apiKey': os.environ['SAFEHERON_API_KEY'],
-    'privateKey': os.environ['SAFEHERON_RSA_PRIVATE_KEY'],
-    'safeheronPublicKey': os.environ['SAFEHERON_PLATFORM_PUBLIC_KEY'],
+    'apiKey': '${SAFEHERON_API_KEY}',#todo Replace with the API Key you read from Safeheron Console
+    'privateKey': '${RSA_PRIVATE_KEY}', #todo Replace with the RSA private key you read from Vault/KMS
+    'safeheronPublicKey': '${SAFEHERON_PLATFORM_PUBLIC_KEY}',#todo Replace with the Safeheron platform public key from Safeheron Console
     'baseUrl': 'https://api.safeheron.vip',
     'requestTimeout': 20000,
 }
-```
-
-### Option B -- Local Config File (Development Only)
-
-Create `config.yaml` outside your source tree (never committed):
-
-```yaml
-apiKey: "your-api-key"
-privateKey: "MIIJQgIBADANBgkqhkiG9w0BAQEFAASC..."    # PKCS8 base64, no headers
-safeheronPublicKey: "MIICIjANBgkqhkiG9w0BAQEFAAOCAQ8A..."  # Platform public key
-baseUrl: "https://api.safeheron.vip"
-requestTimeout: 20000
-```
-
-Load it:
-
-```python
-import yaml
-
-with open("config.yaml", "r") as f:
-    config = yaml.safe_load(f)
-```
-
-Add to `.gitignore`:
-```
-config.yaml
-*.pem
 ```
 
 ### Common Config Mistakes
@@ -202,9 +161,9 @@ from safeheron_api_sdk_python.api.account_api import (
 
 # -- Step 1: Build config --
 config = {
-    'apiKey': os.environ['SAFEHERON_API_KEY'],
-    'privateKey': os.environ['SAFEHERON_RSA_PRIVATE_KEY'],
-    'safeheronPublicKey': os.environ['SAFEHERON_PLATFORM_PUBLIC_KEY'],
+    'apiKey': '${SAFEHERON_API_KEY}',#todo Replace with the API Key you read from Safeheron Console
+    'privateKey': '${RSA_PRIVATE_KEY}', #todo Replace with the RSA private key you read from Vault/KMS
+    'safeheronPublicKey': '${SAFEHERON_PLATFORM_PUBLIC_KEY}',#todo Replace with the Safeheron platform public key from Safeheron Console
     'baseUrl': 'https://api.safeheron.vip',
     'requestTimeout': 20000,
 }

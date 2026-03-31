@@ -21,12 +21,11 @@
 ### Code Pattern -- Loading Credentials
 
 ```typescript
-// CORRECT: Load from environment variable (dev/test)
 const config: SafeheronConfig = {
   baseUrl: 'https://api.safeheron.vip',
-  apiKey: process.env.SAFEHERON_API_KEY!,
-  rsaPrivateKey: process.env.SAFEHERON_RSA_PRIVATE_KEY!,
-  safeheronRsaPublicKey: process.env.SAFEHERON_PLATFORM_PUBLIC_KEY!,
+  apiKey: '${SAFEHERON_API_KEY}',//todo Replace with the API Key you read from Safeheron Console
+  rsaPrivateKey: '${RSA_PRIVATE_KEY}', //todo Replace with the RSA private key you read from Vault/KMS
+  safeheronRsaPublicKey: '${SAFEHERON_PLATFORM_PUBLIC_KEY}',//todo Replace with the Safeheron platform public key from Safeheron Console
   requestTimeout: 20000,
 };
 
@@ -228,7 +227,7 @@ function isTerminalStatus(status: string): boolean {
 
 | Area | Key Rule |
 |---|---|
-| Private keys | KMS/Vault only; never plaintext |
+| Private keys | Vault/KMS only; never plaintext |
 | Transfer addresses | Whitelist required; ONE_TIME_ADDRESS only for truly one-off payments |
 | AML check | Mandatory before every outbound transfer via ToolsApi |
 | Address validation | Mandatory before whitelist add or transfer via CoinApi.checkCoinAddress() |

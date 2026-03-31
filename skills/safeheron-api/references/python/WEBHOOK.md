@@ -46,8 +46,8 @@ from safeheron_api_sdk_python.webhook.webhook_converter import WebhookConverter
 
 # Config for webhook decryption
 webhook_config = {
-    'safeheronWebHookRsaPublicKey': 'MIICIjANBgkqhki...',  # Safeheron platform public key for webhook
-    'webHookRsaPrivateKey': 'MIIJQgIBADANBgk...',           # Your RSA private key (base64, no headers)
+    'safeheronWebHookRsaPublicKey': '${SAFEHERON_WEBHOOK_RSA_PUBLIC_KEY}',  # todo Replace with the Safeheron WebHook RSA public key from Safeheron Console
+    'webHookRsaPrivateKey': '${WEBHOOK_RSA_PRIVATE_KEY}',           # todo Replace with the WebHook RSA private key you read from Vault/KMS
     # OR use PEM file:
     # 'webHookRsaPrivateKeyPemFile': '/path/to/webhook_private.pem',
 }

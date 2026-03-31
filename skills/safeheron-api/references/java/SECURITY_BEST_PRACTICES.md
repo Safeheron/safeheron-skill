@@ -22,11 +22,10 @@
 ### Code Pattern — Loading Credentials
 
 ```java
-// CORRECT: Load from environment variable (dev/test)
 SafeheronConfig config = SafeheronConfig.builder()
-        .apiKey(System.getenv("SAFEHERON_API_KEY"))
-        .rsaPrivateKey(System.getenv("SAFEHERON_RSA_PRIVATE_KEY"))
-        .safeheronRsaPublicKey(System.getenv("SAFEHERON_PLATFORM_PUBLIC_KEY"))
+        .apiKey("${SAFEHERON_API_KEY}")//todo Replace with the API Key you read from Safeheron Console
+        .rsaPrivateKey("${RSA_PRIVATE_KEY}")//todo Replace with the RSA private key you read from Vault/KMS
+        .safeheronRsaPublicKey("${SAFEHERON_PLATFORM_PUBLIC_KEY}")//todo Replace with the Safeheron platform public key from Safeheron Console
         .build();
 
 // CORRECT: Load from AWS Secrets Manager (production)
@@ -253,7 +252,7 @@ Call `/v1/transactions/one` periodically to re-request delivery of events that f
 
 | Area | Key Rule |
 |---|---|
-| Private keys | KMS/Vault only; never plaintext |
+| Private keys | Vault/KMS only; never plaintext |
 | Transfer addresses | Whitelist required; ONE_TIME_ADDRESS only for truly one-off payments |
 | AML check | Mandatory before every outbound transfer via ToolsApiService |
 | Address validation | Mandatory before whitelist add or transfer via CoinApiService.checkCoinAddress() |
