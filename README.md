@@ -20,11 +20,11 @@
 ```bash
 # Project-level
 mkdir -p .claude/skills
-cp -r skills/safeheron .claude/skills/safeheron
+cp -r skills/safeheron-api .claude/skills/safeheron-api
 
 # Or user-level
 mkdir -p ~/.claude/skills
-cp -r skills/safeheron ~/.claude/skills/safeheron
+cp -r skills/safeheron-api ~/.claude/skills/safeheron-api
 ```
 
 Or install as a plugin:
@@ -40,15 +40,15 @@ Cursor natively supports the same `SKILL.md` format and also reads from `.claude
 ```bash
 # Option A — shared install (works for both Claude Code AND Cursor)
 mkdir -p .claude/skills
-cp -r skills/safeheron .claude/skills/safeheron
+cp -r skills/safeheron-api .claude/skills/safeheron-api
 
 # Option B — Cursor native path (project-level)
 mkdir -p .cursor/skills
-cp -r skills/safeheron .cursor/skills/safeheron
+cp -r skills/safeheron-api .cursor/skills/safeheron-api
 
 # Option C — Cursor native path (user-level, applies to all projects)
 mkdir -p ~/.cursor/skills
-cp -r skills/safeheron ~/.cursor/skills/safeheron
+cp -r skills/safeheron-api ~/.cursor/skills/safeheron-api
 ```
 
 > **Note:** `~/.cursor/skills-cursor/` is Cursor's built-in read-only directory — do **not** install there. Use `~/.cursor/skills/` instead.
