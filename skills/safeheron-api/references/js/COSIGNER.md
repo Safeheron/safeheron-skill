@@ -44,6 +44,7 @@ const cosignerConfig: SafeheronCoSignerConfig = {
   ),
   coSignerPubKey: readFileSync(
     path.resolve('./keys/cosigner_identity_public.pem'), 'utf8'
+    // WARNING: ensure ./keys/ is listed in .gitignore — never commit private keys
   ),
 };
 
@@ -54,13 +55,28 @@ app.post('/cosigner/callback', async (req, res) => {
     // 1. Decrypt and verify signature
     //    requestV3convert() handles:
     //    - Verifies RSA signature using Co-Signer identity public key
-    //    - Decrypts AES key using your callback private key
     //    - Decrypts bizContent
     const decrypted = converter.requestV3convert(req.body);
     const payload = JSON.parse(decrypted);
+    const { type, detail } = payload;
 
-    // 2. Business validation
-    const action = await evaluateTransaction(payload);
+    // 2. Business validation — dispatch by type group
+    const txTypes = new Set(['TRANSACTION', 'TX_TRANSACTION', 'CONNECT_TX_SEND', 'TX_CONNECT_TX_SEND', 'TRANSACTION_BATCH_UTXO']);
+    const web3Types = new Set(['ETH_SIGN', 'PERSONAL_SIGN', 'ETH_SIGN_TYPED_DATA', 'ETH_SIGNTRANSACTION']);
+    let action: string;
+    if (txTypes.has(type)) {
+      action = await evaluateTransaction(detail);
+    } else if (type === 'MPC_SIGN') {
+      // MPC raw sign — implement your MPC sign validation here
+      // e.g. verify sourceAccountKey, signAlg, hashs against your pending sign request
+      action = 'APPROVE';
+    } else if (web3Types.has(type)) {
+      // Web3 sign — implement your Web3 sign validation here
+      // e.g. verify subjectType, message content against your pending sign request
+      action = 'APPROVE';
+    } else {
+      action = 'REJECT'; // unknown type — reject by default
+    }
 
     // 3. Encrypt response
     const encryptedResponse = converter.responseV3convert({
@@ -74,7 +90,7 @@ app.post('/cosigner/callback', async (req, res) => {
     // On error, respond with REJECT to be safe
     const encryptedResponse = converter.responseV3convert({
       action: 'REJECT',
-      approvalId: '',
+      approvalId: (req.body as any)?.approvalId ?? '',
     });
     res.json(encryptedResponse);
   }
@@ -95,7 +111,7 @@ Safeheron sends an **encrypted HTTP POST** to your callback URL.
 {
   "timestamp": "1623038312088",
   "sig":        "<signed-with-cosigner-identity-private-key-base64>",
-  "bizContent": "<AES-encrypted-callback-payload-base64>",
+  "bizContent": "<callback-payload-base64>",
   "version":    "v3"
 }
 ```
@@ -117,8 +133,9 @@ After decryption, `bizContent` is a JSON object:
 
 ```json
 {
-  "type": "TRANSACTION_APPROVAL",
-  "customerContent": { ... }
+  "approvalId": "approval_xxxxxx",
+  "type": "TX_TRANSACTION",
+  "detail": { ... }
 }
 ```
 
@@ -126,13 +143,20 @@ After decryption, `bizContent` is a JSON object:
 
 | `type` | Description |
 |--------|-------------|
-| `TRANSACTION` | Regular transaction approval |
+| `TRANSACTION` | Regular outbound transaction approval |
+| `TX_TRANSACTION` | API-initiated transaction approval |
+| `CONNECT_TX_SEND` | WalletConnect send transaction |
+| `TX_CONNECT_TX_SEND` | API-initiated WalletConnect send |
+| `TRANSACTION_BATCH_UTXO` | Batch UTXO transaction |
 | `MPC_SIGN` | MPC raw signing approval |
-| `WEB3_SIGN` | Web3 signing approval |
+| `ETH_SIGN` | Web3 eth_sign approval |
+| `PERSONAL_SIGN` | Web3 personal_sign approval |
+| `ETH_SIGN_TYPED_DATA` | Web3 eth_signTypedData approval |
+| `ETH_SIGNTRANSACTION` | Web3 eth_signTransaction approval |
 
 ---
 
-## TRANSACTION_APPROVAL Payload (`customerContent`)
+## TRANSACTION Payload (`detail`)
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -162,14 +186,14 @@ After decryption, `bizContent` is a JSON object:
 
 ---
 
-## WEB3_SIGN_APPROVAL Payload (`customerContent`)
+## Web3 Payload（type: ETH_SIGN / PERSONAL_SIGN / ETH_SIGN_TYPED_DATA / ETH_SIGNTRANSACTION）
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `txKey` | String | Web3 sign request key |
 | `customerRefId` | String | Your reference ID |
 | `transactionStatus` | String | Status |
-| `subjectType` | String | `ETH_SIGN`, `PERSONAL_SIGN`, `ETH_SIGNTYPEDDATA`, `ETH_SIGNTRANSACTION` |
+| `subjectType` | String | `ETH_SIGN`, `PERSONAL_SIGN`, `ETH_SIGN_TYPED_DATA`, `ETH_SIGNTRANSACTION` (note: no underscore difference vs top-level `type`) |
 | `accountKey` | String | Web3 wallet account key |
 | `sourceAddress` | String | Signing address |
 | `createTime` | Long | Unix timestamp (ms) |
@@ -182,7 +206,7 @@ After decryption, `bizContent` is a JSON object:
 
 ---
 
-## MPC_SIGN_APPROVAL Payload (`customerContent`)
+## MPC_SIGN Payload (`detail`)
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -201,7 +225,7 @@ After decryption, `bizContent` is a JSON object:
 
 ## Approval Callback Response
 
-Your callback service must return an **encrypted response** using the same AES+RSA scheme, signed with your Callback Private Key:
+Your callback service must return a **signed response** signed with your Callback Private Key:
 
 ```json
 {
@@ -213,46 +237,48 @@ Your callback service must return an **encrypted response** using the same AES+R
 | Field | Type | Values |
 |-------|------|--------|
 | `action` | String | `APPROVE` or `REJECT` |
-| `approvalId` | String | Echo back the incoming `txKey` |
+| `approvalId` | String | Echo back the incoming `approvalId` |
 
 ---
 
 ## Approval Logic Examples
 
-### Allow Only Whitelisted Destinations
+### Comprehensive Approval Check (Default REJECT)
+
+Each dimension must pass independently. An unknown or mismatched transaction is rejected by default.
 
 ```typescript
-function evaluateTransaction(payload: any): string {
-  const allowedAddresses = loadWhitelistedAddresses(payload.coinKey);
-  if (!allowedAddresses.has(payload.destinationAddress)) {
+async function evaluateTransaction(payload: any): Promise<string> {
+  // payload is the V3 detail object for TRANSACTION type
+  const { customerRefId, txAmount, destinationAddress, amlList } = payload;
+
+  // 1. Verify customerRefId matches a real pending order — default REJECT
+  const order = await findOrderByCustomerRefId(customerRefId);
+  if (!order) {
+    console.warn(`REJECT: unknown customerRefId ${customerRefId}`);
     return 'REJECT';
   }
-  return 'APPROVE';
-}
-```
 
-### Amount Limit per Account
-
-```typescript
-function evaluateTransaction(payload: any): string {
-  const amount = parseFloat(payload.txAmount);
-  const limit = getAccountLimit(payload.sourceAccountKey);
-  if (amount > limit) {
+  // 2. Verify amount matches exactly — use string equality to avoid float precision loss
+  if (txAmount !== order.expectedAmount) {
+    console.warn(`REJECT: amount mismatch for ${customerRefId}`);
     return 'REJECT';
   }
-  return 'APPROVE';
-}
-```
 
-### AML Risk Check
+  // 3. Verify destination address matches
+  if (destinationAddress.toLowerCase() !== order.destinationAddress.toLowerCase()) {
+    console.warn(`REJECT: destination mismatch for ${customerRefId}`);
+    return 'REJECT';
+  }
 
-```typescript
-function evaluateTransaction(payload: any): string {
-  for (const aml of payload.amlList || []) {
-    if (aml.riskLevel === 'HIGH') {
+  // 4. Check AML risk
+  for (const aml of (amlList || [])) {
+    if (aml.riskLevel === 'HIGH' || aml.riskLevel === 'SEVERE') {
+      console.warn(`REJECT: high AML risk for ${customerRefId}`);
       return 'REJECT';
     }
   }
+
   return 'APPROVE';
 }
 ```

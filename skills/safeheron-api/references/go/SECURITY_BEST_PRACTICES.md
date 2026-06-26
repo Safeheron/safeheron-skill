@@ -56,18 +56,36 @@ saveOrderToDB(customerRefId, amount, toAddress) // persist FIRST
 `ONE_TIME_ADDRESS` must only be used for genuinely temporary, one-off payment scenarios.
 
 **2-3. AML check is mandatory before every transfer.**
+Use KYA screening via `ComplianceApi` to screen the destination address before creating the transaction.
 
 ```go
 // Required before creating any outbound transaction
-submitReq := api.AmlCheckerRequestRequest{
-    Network: "Ethereum",
-    Address: destinationAddress,
+createReq := api.KyaScreeningRequest{
+    Address:   destinationAddress,
+    ChainType: "ETH",
+    Providers: []string{"Chainalysis"},
 }
-var submitResp api.AmlCheckerRequestResponse
-if err := toolsApi.AmlCheckerRequest(submitReq, &submitResp); err != nil {
+var created api.KyaScreeningCreateResponse
+if err := complianceApi.KyaScreeningCreate(createReq, &created); err != nil {
     panic(err)
 }
-// ... poll and check risk level
+
+pollReq := api.KyaScreeningOneRequest{ScreenId: created.ScreenId}
+var result api.KyaScreeningOneResponse
+for i := 0; i < 30; i++ {
+    if err := complianceApi.KyaScreeningOne(pollReq, &result); err != nil {
+        panic(err)
+    }
+    if result.Status == "FINISHED" {
+        break
+    }
+    time.Sleep(2 * time.Second)
+}
+for _, order := range result.Orders {
+    if order.RiskLevel == "HIGH" || order.RiskLevel == "SEVERE" {
+        panic(fmt.Sprintf("AML check failed: %s is %s risk", destinationAddress, order.RiskLevel))
+    }
+}
 ```
 
 **2-4. Validate address format before whitelist add or transfer.**
@@ -215,7 +233,7 @@ Do not rely solely on Webhooks. Run a periodic goroutine to poll the transaction
 |---|---|
 | Private keys | PEM files outside project; never committed to git |
 | Transfer addresses | Whitelist required; ONE_TIME_ADDRESS only for truly one-off payments |
-| AML check | Mandatory before every outbound transfer via ToolsApi |
+| AML check | Mandatory before every outbound transfer via ComplianceApi KYA screening |
 | Address validation | Mandatory before whitelist add or transfer via CoinApi.CheckCoinAddress() |
 | Amounts | `string` in API, `decimal.Decimal` in code; never float |
 | Co-Signer callback | Validate customerRefId + amount + address against business system |

@@ -15,6 +15,7 @@ The `GasApiService` provides:
 ```java
 import com.safeheron.client.api.GasApiService;
 import com.safeheron.client.config.SafeheronConfig;
+import com.safeheron.client.request.GasStatusRequest;
 import com.safeheron.client.request.GasTransactionsGetByTxKeyRequest;
 import com.safeheron.client.response.GasStatusResponse;
 import com.safeheron.client.response.GasTransactionsGetByTxKeyResponse;
@@ -35,7 +36,10 @@ GasApiService gasApi = ServiceCreator.create(GasApiService.class, safeheronConfi
 Query the current gas balance and auto-refill configuration:
 
 ```java
-GasStatusResponse resp = ServiceExecutor.execute(gasApi.gasStatus());
+GasStatusRequest req = new GasStatusRequest();
+// req.setNetworkMode("..."); // optional: filter by network mode
+
+GasStatusResponse resp = ServiceExecutor.execute(gasApi.gasStatus(req));
 
 // Gas balances per coin
 for (GasStatusResponse.GasBalance bal : resp.getGasBalance()) {
@@ -48,6 +52,12 @@ for (GasStatusResponse.Configuration cfg : resp.getConfiguration()) {
                        + " AutoRefill: " + cfg.getEnabled());
 }
 ```
+
+### GasStatusRequest Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `networkMode` | String | Optional. Filter by network mode. |
 
 ### GasStatusResponse Structure
 
@@ -87,7 +97,7 @@ GasTransactionsGetByTxKeyResponse resp = ServiceExecutor.execute(
 |-------|------|-------------|
 | `txKey` | String |  The queried transaction key |
 | `symbol` | String |  Transaction fee coin |
-| `totalAmount` | String |  Total fee amount across all records |
+| `totalAmount` | String |  Total fee amount. A single transaction may have multiple Gas records; the total fee paid is the sum of all records with SUCCESS and FAILURE_GAS_CONSUMED statuses. |
 | `detailList` | `List<Detail>` |  Gas refill records associated with this transaction |
 
 **GasTransactionsGetByTxKeyResponse.Detail Fields:**
@@ -102,10 +112,10 @@ GasTransactionsGetByTxKeyResponse resp = ServiceExecutor.execute(
 | `resourceType` | String | TRON only: ENERGY or BANDWIDTH |
 | `timestamp` | String | Gas deduction time (ms) |
 
-Each gas record includes status values such as:
+Status values:
 - `SUCCESS` — Gas refill completed
-- `FAILURE_GAS_CONSUMED` — Refill attempted but gas was used up
-- `PENDING` — Refill in progress
+- `FAILURE_GAS_REFUNDED` — Gas failed, refunded
+- `FAILURE_GAS_CONSUMED` — Gas failed, but fees were incurred
 
 ---
 

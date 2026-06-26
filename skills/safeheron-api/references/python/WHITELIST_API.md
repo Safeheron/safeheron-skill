@@ -6,6 +6,7 @@
 from safeheron_api_sdk_python.api.whitelist_api import (
     WhitelistApi,
     CreateWhitelistRequest,
+    CreateFromTransactionWhitelistRequest,
     OneWhitelistRequest,
     ListWhitelistRequest,
     EditWhitelistRequest,
@@ -61,7 +62,6 @@ whitelist_key = resp['whitelistKey']   # save this -- permanent identifier
 | `Solana` | Solana |
 | `Bitcoin Testnet` | Bitcoin testnet |
 | `TON` | TON mainnet |
-| `TON_TESTNET` | TON testnet |
 
 ---
 
@@ -102,6 +102,15 @@ param.whitelistName = "Updated name"
 whitelist_api.edit_whitelist(param)
 ```
 
+### EditWhitelistRequest Fields
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `whitelistKey` | Yes | str | Unique identifier of the whitelist entry to edit |
+| `whitelistName` | Yes | str | New display name (max 20 chars) |
+| `address` | Yes | str | Public blockchain address and the address format needs to meet the requirements of the chain |
+| `memo` | No | str | The memo (up to 20 characters) for the public blockchain address, also known as a comment or tag. This parameter is only valid for the following public blockchain types (chainType):TON: TON mainnet |
+| `force` | No | bool | When the whitelist is involved in a transaction approval policy, modifications will result in the new whitelist being directly applied to the approval policy. False by default, meaning that when involved in a transaction approval policy, it will not be modified |
 ---
 
 ## Delete a Whitelist Entry
@@ -111,6 +120,21 @@ param = DeleteWhitelistRequest()
 param.whitelistKey = whitelist_key
 
 whitelist_api.delete_whitelist(param)
+```
+
+---
+
+## Create Whitelist from an Existing Transaction
+
+Automatically creates a whitelist entry using the destination address of a completed transaction:
+
+```python
+param = CreateFromTransactionWhitelistRequest()
+param.txKey = tx_key
+param.whitelistName = "Recipient from TX-001"
+
+resp = whitelist_api.create_from_transaction_whitelist(param)
+whitelist_key = resp['whitelistKey']
 ```
 
 ---

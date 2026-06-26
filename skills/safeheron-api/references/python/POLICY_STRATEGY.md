@@ -77,7 +77,7 @@ def handle_callback():
 
     # 1. Verify signature using Co-Signer identity public key -- REJECT if invalid
     biz_content = converter.request_v3_convert(raw_body)
-    tx = biz_content.get('customerContent', {})
+    tx = biz_content.get('detail', {})
 
     action = "APPROVE"
 

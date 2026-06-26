@@ -103,7 +103,7 @@ app.post('/cosigner/callback', async (req, res) => {
   }
 
   // 6. Check amount within auto-approval limit
-  if (parseFloat(tx.txAmount) > AUTO_APPROVAL_LIMIT) {
+  if (Number(tx.txAmount) > AUTO_APPROVAL_LIMIT) {  // use Decimal for production precision
     const resp = converter.responseV3convert({ action: 'REJECT', approvalId: tx.approvalId });
     return res.json(resp);
   }

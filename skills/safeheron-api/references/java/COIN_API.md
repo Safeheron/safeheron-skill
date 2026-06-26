@@ -92,10 +92,14 @@ if (!Boolean.TRUE.equals(resp.getAmlValid())) {
 
 **CheckCoinAddressRequest Fields:**
 
-| Field | Required | Type | Description |
-|-------|----------|------|-------------|
-| `coinKey` | Yes | String | Coin identifier |
-| `address` | Yes | String | Address to validate |
+| Field | Required | Type | Description                                                                                                                             |
+|-------|----------|------|-----------------------------------------------------------------------------------------------------------------------------------------|
+| `coinKey` | Yes | String | Coin identifier                                                                                                                         |
+| `address` | Yes | String | Address to validate                                                                                                                     |
+| `checkContract` | No | Boolean | Verify contract address (If no value is provided, 'false' by default) <br>True: Verify <br>False: Not verify                            |
+| `checkAml` | No | Boolean | Verify AML compliance (If no value is provided or be verified, AML-compliant address by default) <br>True: Verify <br>False: Not verify |
+| `checkAddressValid` | No | Boolean | Verify the validity of address format (If no value is provided, 'false' by default) <br>True: Verify <br>False: Not verify              |
+| `checkSolanaOwnerAddress` | No | Boolean | Verify if the Solana address is the Owner address (If no value is provided, 'false' by default) <br>True: Verify <br>False: Not verify  |
 
 **CheckCoinAddressResponse Fields:**
 

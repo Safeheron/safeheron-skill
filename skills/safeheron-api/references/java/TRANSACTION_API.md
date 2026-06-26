@@ -68,8 +68,8 @@ String txKey = resp.getTxKey();
 | `destinationAccountType` | Yes | String | `ONE_TIME_ADDRESS`, `VAULT_ACCOUNT`, or `WHITELISTING_ACCOUNT` |
 | `destinationAddress` | Cond. | String | Required when `destinationAccountType=ONE_TIME_ADDRESS` |
 | `destinationAccountKey` | Cond. | String | Required when type is `VAULT_ACCOUNT` (accountKey) or `WHITELISTING_ACCOUNT` (whitelistKey) |
-| `txFeeLevel` | No | String | `LOW` / `MIDDLE` / `HIGH` (priority over feeRateDto) |
-| `feeRateDto` | No | Object | Custom fee rate (requires both `gasLimit` AND `feeRate`) |
+| `txFeeLevel` | No | String | `LOW` / `MIDDLE` / `HIGH` — Choose between transaction fees. If the transaction fee rate is preset, it will take priority |
+| `feeRateDto` | No | Object | Transaction fee rate, either `TxFeeLevel` or `FeeRateDto` |
 | `maxTxFeeRate` | No | String | Max acceptable fee rate |
 | `note` | No | String | Transaction note (max 180 chars) |
 | `customerExt1` | No | String | Custom field 1 (max 255 chars) |
@@ -207,10 +207,18 @@ req.setDestinationAddress("0xRecipient");
 
 TransactionsFeeRateResponse resp = ServiceExecutor.execute(
         transactionApi.transactionFeeRate(req));
-System.out.println("Low:    " + resp.getLowFeeRate());
-System.out.println("Middle: " + resp.getMiddleFeeRate());
-System.out.println("High:   " + resp.getHighFeeRate());
+System.out.println("Low:    " + resp.getLowFeeRate().getFeeRate() + " (fee: " + resp.getLowFeeRate().getFee() + ")");
+System.out.println("Middle: " + resp.getMiddleFeeRate().getFeeRate() + " (fee: " + resp.getMiddleFeeRate().getFee() + ")");
+System.out.println("High:   " + resp.getHighFeeRate().getFeeRate() + " (fee: " + resp.getHighFeeRate().getFee() + ")");
 ```
+
+**FeeRate Object Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `feeRate` | String | Fee rate (gas price or sat/vbyte) |
+| `fee` | String | Estimated total fee amount |
+| `gasLimit` | String | Gas limit (EVM chains only) |
 
 **TransactionsFeeRateRequest Fields:**
 

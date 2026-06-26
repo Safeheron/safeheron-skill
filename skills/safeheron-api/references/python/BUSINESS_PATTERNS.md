@@ -50,9 +50,9 @@ account_key = resp['accountKey']  # store: bind this accountKey <-> userId in yo
 ### Step 2 -- Add coin, get deposit address
 
 ```python
-from safeheron_api_sdk_python.api.account_api import CreateAccountCoinV2Request
+from safeheron_api_sdk_python.api.account_api import CreateAccountCoinRequestV2
 
-param = CreateAccountCoinV2Request()
+param = CreateAccountCoinRequestV2()
 param.accountKey = account_key
 param.coinKeyList = ["ETHEREUM_ETH", "USDT(ERC20)_ETHEREUM_USDT"]
 
@@ -275,7 +275,7 @@ Chains that do NOT support speed-up: NEAR, SUI, TRON, SOL, TON.
 
 ### At withdrawal time:
 - Run destination address through your internal risk engine
-- Optionally use the Safeheron Tools API (AML address checker) -- see [TOOLS_API.md](TOOLS_API.md)
+- Optionally use KYA address screening via `ComplianceApi` -- see [COMPLIANCE_API.md](COMPLIANCE_API.md)
 
 ### In the Approval Callback Service (Co-Signer):
 

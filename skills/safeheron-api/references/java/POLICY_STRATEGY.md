@@ -74,44 +74,50 @@ When the API Co-Signer is the approver, it calls your **Approval Callback Servic
 
 ```java
 @PostMapping("/cosigner/callback")
-public ApprovalResponse handleCallback(@RequestBody String encryptedBody) {
-    // 1. Verify signature using Co-Signer identity public key — REJECT if invalid
-    CallbackPayload payload = decryptAndVerify(encryptedBody);
-    TransactionApproval tx = payload.getCustomerContent();
+public Map<String, String> handleCallback(@RequestBody CoSignerCallBackV3 encryptedBody) throws Exception {
+    // 1. Decrypt and verify signature using Co-Signer identity public key — throws on failure
+    CoSignerBizContentV3 bizContent = coSignerConverter.requestV3Convert(encryptedBody);
+
+    CoSignerResponseV3 response = new CoSignerResponseV3();
+    response.setApprovalId(bizContent.getApprovalId());
+    response.setAction("REJECT");  // default REJECT
+
+    TransactionApproval tx = parseTransactionDetail(bizContent.getDetail());
 
     // 2. Verify customerRefId exists in your DB — REJECT unknown transactions
     WithdrawalOrder order = withdrawalOrderDao.findByCustomerRefId(tx.getCustomerRefId());
     if (order == null) {
         log.warn("REJECT: unknown customerRefId {}", tx.getCustomerRefId());
-        return ApprovalResponse.reject("Unknown transaction");
+        return coSignerConverter.responseV3Converter(response);
     }
 
     // 3. Verify amount matches what the user requested
     if (new BigDecimal(tx.getTxAmount()).compareTo(order.getExpectedAmount()) != 0) {
         log.warn("REJECT: amount mismatch for {}", tx.getCustomerRefId());
-        return ApprovalResponse.reject("Amount mismatch");
+        return coSignerConverter.responseV3Converter(response);
     }
 
     // 4. Verify destination address matches
     if (!tx.getDestinationAddress().equals(order.getDestinationAddress())) {
         log.warn("REJECT: destination mismatch for {}", tx.getCustomerRefId());
-        return ApprovalResponse.reject("Destination mismatch");
+        return coSignerConverter.responseV3Converter(response);
     }
 
     // 5. Check AML risk
-    for (Aml aml : tx.getAmlList()) {
-        if ("HIGH".equalsIgnoreCase(aml.getRiskLevel())) {
-            return ApprovalResponse.reject("High AML risk: " + aml.getProvider());
+    for (TransactionApproval.Aml aml : tx.getAmlList()) {
+        if ("HIGH".equalsIgnoreCase(aml.getRiskLevel()) || "SEVERE".equalsIgnoreCase(aml.getRiskLevel())) {
+            return coSignerConverter.responseV3Converter(response);
         }
     }
 
     // 6. Check amount within auto-approval limit
     if (new BigDecimal(tx.getTxAmount()).compareTo(AUTO_APPROVAL_LIMIT) > 0) {
-        return ApprovalResponse.reject("Exceeds auto-approval limit");
+        return coSignerConverter.responseV3Converter(response);
     }
 
     // 7. All checks passed — approve
-    return ApprovalResponse.approve(tx.getCustomerRefId());
+    response.setAction("APPROVE");
+    return coSignerConverter.responseV3Converter(response);
 }
 ```
 

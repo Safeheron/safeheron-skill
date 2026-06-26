@@ -59,7 +59,6 @@ String whitelistKey = resp.getWhitelistKey();   // save this — permanent ident
 | `Solana` | Solana |
 | `Bitcoin Testnet` | Bitcoin testnet |
 | `TON` | TON mainnet |
-| `TON_TESTNET` | TON testnet |
 
 ---
 
@@ -98,11 +97,20 @@ for (WhitelistResponse entry : list) {
 EditWhitelistRequest req = new EditWhitelistRequest();
 req.setWhitelistKey(whitelistKey);
 req.setWhitelistName("Updated name");
-// req.setAddress("0xNewAddress");  // optional
+req.setAddress("0xNewAddress");
 
 ServiceExecutor.execute(whitelistApi.editWhitelist(req));
 ```
 
+### EditWhitelistRequest Fields
+
+| Field | Required | Type    | Description |
+|-------|----------|---------|-------------|
+| `whitelistKey` | Yes | String  | Unique identifier of the whitelist entry to edit |
+| `whitelistName` | Yes | String  | New display name (max 20 chars) |
+| `address` | Yes | String  | Public blockchain address and the address format needs to meet the requirements of the chain |
+| `memo` | No | String  | The memo (up to 20 characters) for the public blockchain address, also known as a comment or tag. This parameter is only valid for the following public blockchain types (chainType):TON: TON mainnet |
+| `force` | No | Boolean | When the whitelist is involved in a transaction approval policy, modifications will result in the new whitelist being directly applied to the approval policy. False by default, meaning that when involved in a transaction approval policy, it will not be modified |
 ---
 
 ## Delete a Whitelist Entry

@@ -62,10 +62,10 @@ def handle_cosigner_callback():
         biz_content = converter.request_v3_convert(raw_body)
 
         callback_type = biz_content.get('type', '')
-        customer_content = biz_content.get('customerContent', {})
+        detail = biz_content.get('detail', {})
 
         # Determine approval based on business logic
-        action = evaluate_approval(callback_type, customer_content)
+        action = evaluate_approval(callback_type, detail)
 
         # Build encrypted response
         response = CoSignerResponseV3()
@@ -88,11 +88,11 @@ def handle_cosigner_callback():
 def evaluate_approval(callback_type, content):
     """Implement your business validation logic here."""
 
-    if callback_type == 'TRANSACTION':
+    if callback_type in ('TRANSACTION', 'TX_TRANSACTION', 'CONNECT_TX_SEND', 'TX_CONNECT_TX_SEND', 'TRANSACTION_BATCH_UTXO'):
         return evaluate_transaction_approval(content)
     elif callback_type == 'MPC_SIGN':
         return evaluate_mpc_sign_approval(content)
-    elif callback_type == 'WEB3_SIGN':
+    elif callback_type in ('ETH_SIGN', 'PERSONAL_SIGN', 'ETH_SIGN_TYPED_DATA', 'ETH_SIGNTRANSACTION'):
         return evaluate_web3_sign_approval(content)
 
     # Unknown type -- reject
@@ -120,7 +120,7 @@ def evaluate_transaction_approval(tx):
 
     # 4. Check AML risk
     for aml in tx.get('amlList', []):
-        if aml.get('riskLevel', '').upper() == 'HIGH':
+        if aml.get('riskLevel', '').upper() in ('HIGH', 'SEVERE'):
             return "REJECT"
 
     return "APPROVE"
@@ -130,13 +130,20 @@ def evaluate_transaction_approval(tx):
 
 | `type` | Description |
 |--------|-------------|
-| `TRANSACTION` | Regular transaction approval |
+| `TRANSACTION` | Regular outbound transaction approval |
+| `TX_TRANSACTION` | API-initiated transaction approval |
+| `CONNECT_TX_SEND` | WalletConnect send transaction |
+| `TX_CONNECT_TX_SEND` | API-initiated WalletConnect send |
+| `TRANSACTION_BATCH_UTXO` | Batch UTXO transaction |
 | `MPC_SIGN` | MPC raw signing approval |
-| `WEB3_SIGN` | Web3 signing approval |
+| `ETH_SIGN` | Web3 eth_sign approval |
+| `PERSONAL_SIGN` | Web3 personal_sign approval |
+| `ETH_SIGN_TYPED_DATA` | Web3 eth_signTypedData approval |
+| `ETH_SIGNTRANSACTION` | Web3 eth_signTransaction approval |
 
 ---
 
-## TRANSACTION_APPROVAL Payload (`customerContent`)
+## TRANSACTION Payload (`detail`)
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -166,14 +173,14 @@ def evaluate_transaction_approval(tx):
 
 ---
 
-## WEB3_SIGN_APPROVAL Payload (`customerContent`)
+## Web3 Payload（type: ETH_SIGN / PERSONAL_SIGN / ETH_SIGN_TYPED_DATA / ETH_SIGNTRANSACTION）
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `txKey` | String | Web3 sign request key |
 | `customerRefId` | String | Your reference ID |
 | `transactionStatus` | String | Status |
-| `subjectType` | String | `ETH_SIGN`, `PERSONAL_SIGN`, `ETH_SIGNTYPEDDATA`, `ETH_SIGNTRANSACTION` |
+| `subjectType` | String | `ETH_SIGN`, `PERSONAL_SIGN`, `ETH_SIGN_TYPED_DATA`, `ETH_SIGNTRANSACTION` |
 | `accountKey` | String | Web3 wallet account key |
 | `sourceAddress` | String | Signing address |
 | `createTime` | Long | Unix timestamp (ms) |
@@ -186,7 +193,7 @@ def evaluate_transaction_approval(tx):
 
 ---
 
-## MPC_SIGN_APPROVAL Payload (`customerContent`)
+## MPC_SIGN Payload (`detail`)
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -205,7 +212,7 @@ def evaluate_transaction_approval(tx):
 
 ## Approval Callback Response
 
-Your callback service must return an **encrypted response** using the same AES+RSA scheme, signed with your Callback Private Key:
+Your callback service must return a **signed response** signed with your Callback Private Key:
 
 ```json
 {
@@ -217,7 +224,7 @@ Your callback service must return an **encrypted response** using the same AES+R
 | Field | Type | Values |
 |-------|------|--------|
 | `action` | String | `APPROVE` or `REJECT` |
-| `approvalId` | String | Echo back the incoming `txKey` |
+| `approvalId` | String | Echo back the incoming `approvalId` |
 
 ---
 

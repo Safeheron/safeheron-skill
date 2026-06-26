@@ -62,14 +62,26 @@ await transactionApi.createTransactions({ customerRefId, ... });
 One-time address (`ONE_TIME_ADDRESS`) must only be used for genuinely temporary, one-off payment scenarios.
 
 **2-3. AML check is mandatory before every transfer.**
-Call `toolsApi.amlCheckerRequest()` to screen the destination address before creating the transaction.
+Use KYA screening via `ComplianceApi` to screen the destination address before creating the transaction.
 
 ```typescript
-const submitResp = await toolsApi.amlCheckerRequest({
-  network: 'Ethereum',
+const created = await complianceApi.createKyaScreening({
   address: destinationAddress,
+  chainType: 'ETH',
+  providers: ['Chainalysis'],
 });
-// Poll for result and block high-risk addresses
+
+let result: any;
+for (let i = 0; i < 30; i++) {
+  result = await complianceApi.kyaScreeningOne({ screenId: created.screenId });
+  if (result.status === 'FINISHED') break;
+  await new Promise(resolve => setTimeout(resolve, 2000));
+}
+for (const order of result.orders) {
+  if (order.riskLevel === 'HIGH' || order.riskLevel === 'SEVERE') {
+    throw new Error(`AML check failed: ${destinationAddress} is ${order.riskLevel} risk`);
+  }
+}
 ```
 
 **2-4. Validate address format before whitelist add or transfer.**
@@ -229,7 +241,7 @@ function isTerminalStatus(status: string): boolean {
 |---|---|
 | Private keys | Vault/KMS only; never plaintext |
 | Transfer addresses | Whitelist required; ONE_TIME_ADDRESS only for truly one-off payments |
-| AML check | Mandatory before every outbound transfer via ToolsApi |
+| AML check | Mandatory before every outbound transfer via ComplianceApi KYA screening |
 | Address validation | Mandatory before whitelist add or transfer via CoinApi.checkCoinAddress() |
 | Amounts | String in API; never floating-point number |
 | Co-Signer callback | Validate customerRefId + amount + address against business system |

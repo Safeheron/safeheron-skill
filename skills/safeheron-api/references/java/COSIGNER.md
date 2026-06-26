@@ -31,7 +31,7 @@ Safeheron sends an **encrypted HTTP POST** to your callback URL.
 {
   "timestamp": "1623038312088",
   "sig":        "<signed-with-cosigner-identity-private-key-base64>",
-  "bizContent": "<AES-encrypted-callback-payload-base64>",
+  "bizContent": "<callback-payload-base64>",
   "version":    "v3"
 }
 ```
@@ -47,14 +47,109 @@ Safeheron sends an **encrypted HTTP POST** to your callback URL.
 - Upon receiving the request, the Approval Callback Service uses the API Co-Signer's public key to authenticate the request data, ensuring that the request originates from the API Co-Signer.
 ---
 
+## Approval Callback Service (Spring Boot Implementation)
+
+### Configure CoSignerConverter
+
+```java
+import com.safeheron.client.cosigner.CoSignerConverter;
+import com.safeheron.client.cosigner.CoSignerBizContentV3;
+import com.safeheron.client.cosigner.CoSignerCallBackV3;
+import com.safeheron.client.cosigner.CoSignerResponseV3;
+
+@Configuration
+public class CoSignerConfig {
+    @Bean
+    public CoSignerConverter coSignerConverter() {
+        return new CoSignerConverter("YOUR_COSIGNER_PUBLIC_KEY","YOUR_CALLBACK_PRIVATE_KEY_BASE64");
+    }
+}
+```
+
+### Spring Boot Approval Callback Controller (V3 — Recommended)
+
+```java
+@RestController
+public class CoSignerCallbackController {
+
+    @Autowired
+    private CoSignerConverter coSignerConverter;
+
+    @PostMapping("/cosigner/callback")
+    public Map<String, String> handleCallback(@RequestBody CoSignerCallBackV3 encryptedBody) throws Exception {
+        // 1. Decrypt and verify signature using Co-Signer identity public key
+        CoSignerBizContentV3 bizContent = coSignerConverter.requestV3Convert(encryptedBody);
+
+        // Default REJECT — only set APPROVE when all checks pass
+        CoSignerResponseV3 response = new CoSignerResponseV3();
+        response.setApprovalId(bizContent.getApprovalId());
+        response.setAction("REJECT");
+
+        String callbackType = bizContent.getType();
+        // Dispatch by type group
+        Set<String> txTypes = Set.of("TRANSACTION", "TX_TRANSACTION", "CONNECT_TX_SEND", "TX_CONNECT_TX_SEND", "TRANSACTION_BATCH_UTXO");
+        Set<String> web3Types = Set.of("ETH_SIGN", "PERSONAL_SIGN", "ETH_SIGN_TYPED_DATA", "ETH_SIGNTRANSACTION");
+
+        if (txTypes.contains(callbackType)) {
+            // Handle transaction approval — fall through to validation below
+        } else if ("MPC_SIGN".equals(callbackType)) {
+            // MPC raw sign — implement your MPC sign validation here
+            // e.g. verify sourceAccountKey, signAlg, hashs against your pending sign request
+            response.setAction("APPROVE");
+            return coSignerConverter.responseV3Converter(response);
+        } else if (web3Types.contains(callbackType)) {
+            // Web3 sign — implement your Web3 sign validation here
+            // e.g. verify subjectType, message content against your pending sign request
+            response.setAction("APPROVE");
+            return coSignerConverter.responseV3Converter(response);
+        } else {
+            // Unknown type — reject by default
+            return coSignerConverter.responseV3Converter(response);
+        }
+
+        // 2. Parse the transaction detail
+        TransactionApproval tx = parseTransactionDetail(bizContent.getDetail());
+
+        // 3. Verify customerRefId matches a real pending order
+        BusinessOrder order = orderService.findByCustomerRefId(tx.getCustomerRefId());
+        if (order == null) {
+            return coSignerConverter.responseV3Converter(response);
+        }
+
+        // 4. Verify amount matches exactly
+        if (new BigDecimal(tx.getTxAmount()).compareTo(order.getExpectedAmount()) != 0) {
+            return coSignerConverter.responseV3Converter(response);
+        }
+
+        // 5. Verify destination address matches
+        if (!tx.getDestinationAddress().equalsIgnoreCase(order.getDestinationAddress())) {
+            return coSignerConverter.responseV3Converter(response);
+        }
+
+        // 6. Check AML risk
+        for (TransactionApproval.Aml aml : tx.getAmlList()) {
+            if ("HIGH".equalsIgnoreCase(aml.getRiskLevel()) || "SEVERE".equalsIgnoreCase(aml.getRiskLevel())) {
+                return coSignerConverter.responseV3Converter(response);
+            }
+        }
+
+        response.setAction("APPROVE");
+        return coSignerConverter.responseV3Converter(response);
+    }
+}
+```
+
+---
+
 ## Decrypted Callback Payload Structure
 
 After decryption, `bizContent` is a JSON object:
 
 ```json
 {
-  "type": "TRANSACTION_APPROVAL",
-  "customerContent": { ... }
+  "approvalId": "approval_xxxxxx",
+  "type": "TRANSACTION",
+  "detail": { ... }
 }
 ```
 
@@ -62,13 +157,20 @@ After decryption, `bizContent` is a JSON object:
 
 | `type` | Description |
 |--------|-------------|
-| `TRANSACTION` | Regular transaction approval |
+| `TRANSACTION` | Regular outbound transaction approval |
+| `TX_TRANSACTION` | Transaction initiated via API |
+| `CONNECT_TX_SEND` | WalletConnect send transaction |
+| `TX_CONNECT_TX_SEND` | API-initiated WalletConnect send |
+| `TRANSACTION_BATCH_UTXO` | Batch UTXO transaction |
 | `MPC_SIGN` | MPC raw signing approval |
-| `WEB3_SIGN` | Web3 signing approval |
+| `ETH_SIGN` | Web3 ethSign approval |
+| `PERSONAL_SIGN` | Web3 personalSign approval |
+| `ETH_SIGN_TYPED_DATA` | Web3 signTypedData approval |
+| `ETH_SIGNTRANSACTION` | Web3 ethSignTransaction approval |
 
 ---
 
-## TRANSACTION_APPROVAL Payload (`customerContent`)
+## TRANSACTION Payload (`detail`)
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -98,14 +200,14 @@ After decryption, `bizContent` is a JSON object:
 
 ---
 
-## WEB3_SIGN_APPROVAL Payload (`customerContent`)
+## Web3 Payload（type: ETH_SIGN / PERSONAL_SIGN / ETH_SIGN_TYPED_DATA / ETH_SIGNTRANSACTION）
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `txKey` | String | Web3 sign request key |
 | `customerRefId` | String | Your reference ID |
 | `transactionStatus` | String | Status |
-| `subjectType` | String | `ETH_SIGN`, `PERSONAL_SIGN`, `ETH_SIGNTYPEDDATA`, `ETH_SIGNTRANSACTION` |
+| `subjectType` | String | `ETH_SIGN`, `PERSONAL_SIGN`, `ETH_SIGN_TYPED_DATA`, `ETH_SIGNTRANSACTION` |
 | `accountKey` | String | Web3 wallet account key |
 | `sourceAddress` | String | Signing address |
 | `createTime` | Long | Unix timestamp (ms) |
@@ -118,7 +220,7 @@ After decryption, `bizContent` is a JSON object:
 
 ---
 
-## MPC_SIGN_APPROVAL Payload (`customerContent`)
+## MPC_SIGN Payload (`detail`)
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -137,7 +239,7 @@ After decryption, `bizContent` is a JSON object:
 
 ## Approval Callback Response
 
-Your callback service must return an **encrypted response** using the same AES+RSA scheme, signed with your Callback Private Key:
+Your callback service must return a **signed response** signed with your Callback Private Key:
 
 ```json
 {
@@ -149,7 +251,7 @@ Your callback service must return an **encrypted response** using the same AES+R
 | Field | Type | Values |
 |-------|------|--------|
 | `action` | String | `APPROVE` or `REJECT` |
-| `approvalId` | String | Echo back the incoming `txKey` |
+| `approvalId` | String | Echo back the incoming `approvalId` |
 
 ---
 
@@ -158,8 +260,9 @@ Your callback service must return an **encrypted response** using the same AES+R
 ### Allow Only Whitelisted Destinations
 
 ```java
-private boolean shouldApprove(TransactionApproval req) {
-    if (!"TRANSACTION_APPROVAL".equals(callbackType)) return true;
+private boolean shouldApprove(String callbackType, TransactionApproval req) {
+    Set<String> txTypes = Set.of("TRANSACTION", "TX_TRANSACTION", "CONNECT_TX_SEND", "TX_CONNECT_TX_SEND", "TRANSACTION_BATCH_UTXO");
+    if (!txTypes.contains(callbackType)) return true;
     Set<String> allowedAddresses = loadWhitelistedAddresses(req.getCoinKey());
     return allowedAddresses.contains(req.getDestinationAddress());
 }
@@ -168,7 +271,7 @@ private boolean shouldApprove(TransactionApproval req) {
 ### Amount Limit per Account
 
 ```java
-private boolean shouldApprove(TransactionApproval req) {
+private boolean shouldApprove(String callbackType, TransactionApproval req) {
     BigDecimal amount = new BigDecimal(req.getTxAmount());
     BigDecimal limit  = getAccountLimit(req.getSourceAccountKey());
     return amount.compareTo(limit) <= 0;
@@ -178,9 +281,9 @@ private boolean shouldApprove(TransactionApproval req) {
 ### AML Risk Check
 
 ```java
-private boolean shouldApprove(TransactionApproval req) {
-    for (Aml aml : req.getAmlList()) {
-        if ("HIGH".equalsIgnoreCase(aml.getRiskLevel())) {
+private boolean shouldApprove(String callbackType, TransactionApproval req) {
+    for (TransactionApproval.Aml aml : req.getAmlList()) {
+        if ("HIGH".equalsIgnoreCase(aml.getRiskLevel()) || "SEVERE".equalsIgnoreCase(aml.getRiskLevel())) {
             return false;
         }
     }

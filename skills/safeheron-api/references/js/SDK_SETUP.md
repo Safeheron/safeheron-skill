@@ -63,7 +63,6 @@ import { WhitelistApi } from '@safeheron/api-sdk';
 import { WebhookApi } from '@safeheron/api-sdk';
 import { ComplianceApi } from '@safeheron/api-sdk';
 import { GasApi } from '@safeheron/api-sdk';
-import { ToolsApi } from '@safeheron/api-sdk';
 
 const accountApi     = new AccountApi(config);
 const transactionApi = new TransactionApi(config);
@@ -74,7 +73,6 @@ const whitelistApi   = new WhitelistApi(config);
 const webhookApi     = new WebhookApi(config);
 const complianceApi  = new ComplianceApi(config);
 const gasApi         = new GasApi(config);
-const toolsApi       = new ToolsApi(config);
 ```
 
 ## Executing Calls

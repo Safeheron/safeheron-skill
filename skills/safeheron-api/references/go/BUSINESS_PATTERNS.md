@@ -34,9 +34,10 @@ Wallet Account 1          Wallet Account 2          Wallet Account ...
 ### Step 1 -- Create wallet account, bind to user
 
 ```go
+h := true
 req := api.CreateAccountRequest{
     AccountName: fmt.Sprintf("user-%s", userId),
-    HiddenOnUI:  true,    // hide from App/Console UI
+    HiddenOnUI:  &h,    // hide from App/Console UI
     AccountTag:  "DEPOSIT", // required for Auto-Sweep
 }
 
@@ -114,7 +115,7 @@ func pollTransactions(transactionApi api.TransactionApi, lastPolledMs int64) {
         TransactionStatus: "COMPLETED",
     }
 
-    var txList []api.TransactionsResponse
+    var txList api.TransactionsResponseV2
     if err := transactionApi.ListTransactionsV2(req, &txList); err != nil {
         log.Printf("Failed to poll transactions: %v", err)
         return
@@ -289,7 +290,7 @@ Chains that do NOT support speed-up: NEAR, SUI, TRON, SOL, TON.
 
 ### At withdrawal time:
 - Run destination address through your internal risk engine
-- Optionally use the Safeheron Tools API -- see [TOOLS_API.md](TOOLS_API.md)
+- Optionally use KYA address screening via `ComplianceApi` -- see [COMPLIANCE_API.md](COMPLIANCE_API.md)
 
 ### In the Approval Callback Service:
 

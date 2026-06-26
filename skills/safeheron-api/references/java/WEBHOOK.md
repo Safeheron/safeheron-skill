@@ -30,7 +30,7 @@ Webhook payloads use the **same AES+RSA encryption scheme** as API responses. Th
 ### Decryption Steps (same as API response decryption)
 
 1. Build signature string: sort all fields by key ascending (exclude `rsaType`, `aesType`):
-   `bizContent=...&code=...&key=...&timestamp=...`
+   `bizContent=...&key=...&timestamp=...`
 2. Verify `sig` using **Safeheron's RSA public key** — reject if invalid.
 3. Decrypt `key` field using **your RSA private key** → 48 bytes (AES key + IV).
 4. Decrypt `bizContent` using AES/GCM/NoPadding → plaintext JSON event payload.
@@ -57,11 +57,13 @@ public class SafeheronWebhookConfig {
 ```java
 import com.safeheron.client.webhook.WebHook;
 import com.safeheron.client.webhook.WebHookBizContent;
+import com.safeheron.client.webhook.WebHookResponse;
 import com.safeheron.client.webhook.WebhookConverter;
 import com.safeheron.client.webhook.MPCSignParam;
 import com.safeheron.client.webhook.TransactionParam;
 import com.safeheron.client.webhook.Web3SignParam;
 
+@Slf4j
 @RestController
 public class WebhookController {
 
@@ -187,7 +189,7 @@ public class WebhookController {
 | `txKey` | String | Web3 sign request key |
 | `customerRefId` | String | Your reference ID |
 | `transactionStatus` | String | Status |
-| `subjectType` | String | `ETH_SIGN`, `PERSONAL_SIGN`, `ETH_SIGNTYPEDDATA`, `ETH_SIGNTRANSACTION` |
+| `subjectType` | String | `ETH_SIGN`, `PERSONAL_SIGN`, `ETH_SIGN_TYPED_DATA`, `ETH_SIGNTRANSACTION` |
 | `accountKey` | String | Web3 wallet key |
 | `sourceAddress` | String | Signing address |
 | `message` / `messageHash` / `transaction` | Object | Signed content (type-dependent) |
@@ -239,7 +241,7 @@ ServiceExecutor.execute(webhookApi.resendWebhook(resendReq));
 
 ### `resendFailed` — Re-push all failed events in a time range
 
-Re-pushes every failed webhook event within a time window (max 1 hour). Rate-limited to once every 10 minutes.
+Re-pushes every failed webhook event within a time window (max 1 hour). Rate-limited to once every 10 minutes. Only webhooks from the **past 7 days** can be resent — requests with timestamps older than 7 days will silently return empty results.
 
 > **Warning:** Your handler must be idempotent. `resendFailed` may re-deliver intermediate-status events (e.g. `CONFIRMING`) even if you already received a terminal status (`COMPLETED`). Never roll back a terminal state.
 
@@ -302,17 +304,16 @@ public ResponseEntity<String> handleWebhook(@RequestBody String rawBody,
     try {
         WebHook param = mapper.readValue(rawBody, WebHook.class);
 
-        // Step 1: verify sig using Safeheron's RSA public key — REJECT if fails
-        boolean sigValid = verifySignature(param, safeheronRsaPublicKey);
-        if (!sigValid) {
-            log.error("Webhook signature verification FAILED — possible tampering");
-            return ResponseEntity.ok("OK");  // still return 200 to avoid retry storms
-        }
+        // convert() atomically verifies RSA signature + decrypts bizContent.
+        // Throws SafeheronException if signature verification fails — do NOT catch separately.
+        WebHookBizContent resp = webhookConverter.convert(param);
 
-        // Step 2: decrypt and enqueue for async processing
-        String decrypted = decryptBizContent(param);
-        eventQueue.offer(decrypted);
+        // Signature verified — enqueue for async processing
+        eventQueue.offer(resp);
 
+    } catch (SafeheronException e) {
+        // Signature verification failed — reject silently (return 200 to avoid retry storms)
+        log.error("Webhook signature verification FAILED — possible tampering: {}", e.getMessage());
     } catch (Exception e) {
         log.error("Webhook error", e);
     }

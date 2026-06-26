@@ -71,7 +71,7 @@ param = CreateWeb3EthSignTypedDataRequest()
 param.customerRefId = str(uuid.uuid4())
 param.accountKey = web3_account_key
 param.message.chainId = 1
-param.message.version = "ETH_SIGNTYPEDDATA_V4"  # "v1", "v3", "v4", or "ETH_SIGNTYPEDDATA_V4"
+param.message.version = "ETH_SIGNTYPEDDATA_V4"  # ETH_SIGNTYPEDDATA_V1, ETH_SIGNTYPEDDATA_V3, or ETH_SIGNTYPEDDATA_V4
 param.message.data = '{"types":{...}, "domain":{...}, "message":{...}}'
 
 resp = web3_api.createWeb3EthSignTypedData(param)
@@ -254,7 +254,7 @@ print(f"tx_hash: {on_chain_hash}")
 | `accountKey` | str | Web3 wallet account key |
 | `sourceAddress` | str | Signing address |
 | `transactionStatus` | str | `SUBMITTED`, `SIGNING`, `SIGN_COMPLETED`, `FAILED`, `REJECTED`, `CANCELLED` |
-| `subjectType` | str | `ETH_SIGN`, `PERSONAL_SIGN`, `ETH_SIGNTYPEDDATA`, `ETH_SIGNTRANSACTION` |
+| `subjectType` | str | `ETH_SIGN`, `PERSONAL_SIGN`, `ETH_SIGN_TYPED_DATA`, `ETH_SIGNTRANSACTION` |
 | `customerRefId` | str | Your reference ID |
 
 ---

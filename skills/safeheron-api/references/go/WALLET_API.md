@@ -175,6 +175,40 @@ fmt.Printf("Address: %s\n", resp[0].Address)
 
 ---
 
+### Add Coin to Account (V2 — Recommended)
+
+V2 supports adding multiple coins in a single call.
+
+```go
+req := api.AddCoinV2Request{
+    AccountKey:  accountKey,
+    CoinKeyList: []string{"ETHEREUM_ETH", "TRON_TRX"},
+}
+var resp api.AddCoinV2Response
+if err := accountApi.AddCoinV2(req, &resp); err != nil {
+    panic(fmt.Errorf("failed to add coins: %w", err))
+}
+
+fmt.Println("Account key:", resp.AccountKey)
+for _, ca := range resp.CoinAddressList {
+    fmt.Printf("Coin: %s, Address: %s\n", ca.CoinKey, ca.AddressList[0].Address)
+}
+```
+
+**AddCoinV2Request Fields:**
+| Field | Type | Description |
+|-------|------|-------------|
+| `AccountKey` | `string` | Target account key |
+| `CoinKeyList` | `[]string` | List of coin keys to enable |
+
+**AddCoinV2Response Fields:**
+| Field | Type | Description |
+|-------|------|-------------|
+| `AccountKey` | `string` | Account key |
+| `CoinAddressList` | `[]CoinAddress` | List of created coin addresses |
+
+---
+
 ## List Coins on a Wallet Account
 
 ```go
@@ -182,7 +216,7 @@ req := api.ListAccountCoinRequest{
     AccountKey: accountKey,
 }
 
-var coins []api.AccountCoinResponse
+var coins api.AccountCoinResponse
 if err := accountApi.ListAccountCoin(req, &coins); err != nil {
     panic(fmt.Errorf("failed to list account coins: %w", err))
 }

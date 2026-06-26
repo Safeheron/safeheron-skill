@@ -18,6 +18,8 @@ const transactionApi = new TransactionApi(config);
 
 ## Create a Transaction
 
+### V2 (standard — returns txKey only)
+
 ```typescript
 const resp = await transactionApi.createTransactions({
   customerRefId: crypto.randomUUID(),   // your unique ID
@@ -35,6 +37,33 @@ const resp = await transactionApi.createTransactions({
 const txKey = resp.txKey;  // save this -- Safeheron transaction identifier
 ```
 
+### V3 (extended — returns txKey + idempotency info)
+
+```typescript
+const resp = await transactionApi.createTransactionsV3({
+  // same request object as createTransactions
+  customerRefId: crypto.randomUUID(),
+  coinKey: 'ETHEREUM_ETH',
+  txAmount: '0.01',
+  sourceAccountKey: accountKey,
+  sourceAccountType: 'VAULT_ACCOUNT',
+  destinationAccountType: 'ONE_TIME_ADDRESS',
+  destinationAddress: '0xRecipientAddress',
+  txFeeLevel: 'MIDDLE',
+});
+
+const txKey = resp.txKey;
+const isDuplicate = resp.idempotentRequest; // true = duplicate customerRefId, original txKey returned
+```
+
+**CreateTransactionV3Response Key Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `txKey` | string | Safeheron transaction key |
+| `customerRefId` | string | Your unique business ID echoed back |
+| `idempotentRequest` | boolean | `true` if a duplicate `customerRefId` was detected — the original `txKey` is returned instead of creating a new transaction |
+
 ### CreateTransactionRequest Key Fields
 
 | Field | Required | Type | Description |
@@ -47,8 +76,8 @@ const txKey = resp.txKey;  // save this -- Safeheron transaction identifier
 | `destinationAccountType` | Yes | string | `ONE_TIME_ADDRESS`, `VAULT_ACCOUNT`, or `WHITELISTING_ACCOUNT` |
 | `destinationAddress` | Cond. | string | Required when `destinationAccountType=ONE_TIME_ADDRESS` |
 | `destinationAccountKey` | Cond. | string | Required when type is `VAULT_ACCOUNT` (accountKey) or `WHITELISTING_ACCOUNT` (whitelistKey) |
-| `txFeeLevel` | No | string | `LOW` / `MIDDLE` / `HIGH` (priority over feeRateDto) |
-| `feeRateDto` | No | object | Custom fee rate (requires both `gasLimit` AND `feeRate`) |
+| `txFeeLevel` | No | string | `LOW` / `MIDDLE` / `HIGH` — Choose between transaction fees. If the transaction fee rate is preset, it will take priority |
+| `feeRateDto` | No | object | Transaction fee rate, either `TxFeeLevel` or `FeeRateDto` |
 | `maxTxFeeRate` | No | string | Max acceptable fee rate |
 | `note` | No | string | Transaction note (max 180 chars) |
 | `customerExt1` | No | string | Custom field 1 (max 255 chars) |
@@ -141,10 +170,18 @@ const resp = await transactionApi.transactionFeeRate({
   destinationAddress: '0xRecipient',
 });
 
-console.log('Low:', resp.lowFeeRate);
-console.log('Middle:', resp.middleFeeRate);
-console.log('High:', resp.highFeeRate);
+console.log('Low:   ', resp.lowFeeRate.feeRate, '(fee:', resp.lowFeeRate.fee + ')');
+console.log('Middle:', resp.middleFeeRate.feeRate, '(fee:', resp.middleFeeRate.fee + ')');
+console.log('High:  ', resp.highFeeRate.feeRate, '(fee:', resp.highFeeRate.fee + ')');
 ```
+
+**FeeRate Object Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `feeRate` | string | Fee rate (gas price or sat/vbyte) |
+| `fee` | string | Estimated total fee amount |
+| `gasLimit` | string | Gas limit (EVM chains only) |
 
 > **BTC fee** = feeRate x bytesSize. **ETH fee** = feeRate x gasLimit.
 > **TRON fee**: `sourceAddress` must be provided to check on-chain staking/energy.
@@ -213,6 +250,48 @@ SUBMITTED
 | Withdrawal (outflow) | `ONE_TIME_ADDRESS` | `VAULT_ACCOUNT` |
 | Internal transfer | `VAULT_ACCOUNT` | `VAULT_ACCOUNT` |
 | Deposit (inflow) | -- | `UNKNOWN` |
+
+---
+
+## Get Transaction Approval Details
+
+```typescript
+const resp = await transactionApi.approvalDetailTransactions({
+  txKeyList: [txKey],  // max 20 keys
+});
+
+for (const detail of resp.approvalDetailList) {
+  console.log(detail.txKey, detail.approvalStatus, detail.policyName);
+}
+```
+
+**ApprovalDetailTransactionsRequest Fields:**
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `txKeyList` | Yes | Array\<string\> | List of transaction keys to query (max 20) |
+
+**ApprovalDetail Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `txKey` | string | Safeheron transaction key |
+| `approvalStatus` | string | Current approval status (see below) |
+| `policyName` | string | Name of the matched approval policy |
+| `approvalProgress` | object | Approval progress details |
+
+**`approvalStatus` Values:**
+
+| Value | Description |
+|-------|-------------|
+| `PENDING_APPROVAL` | Awaiting approver action |
+| `APPROVED` | Approved — transaction proceeds to signing |
+| `REJECTED` | Denied by an approver |
+| `CANCELLED` | Cancelled before completion |
+| `BLOCKED_BY_POLICY` | Blocked by a policy rule |
+| `FAILED` | Approval process failed |
+
+> **Note:** Results exclude transactions using old policies, non-existent txKeys, and incoming fund transactions.
 
 ---
 

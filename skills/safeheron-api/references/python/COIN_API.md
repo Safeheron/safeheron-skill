@@ -95,13 +95,14 @@ if not resp.get('amlValid'):
 
 **CheckCoinAddressRequest Fields:**
 
-| Field | Required | Type | Description |
-|-------|----------|------|-------------|
-| `coinKey` | Yes | str | Coin identifier |
-| `address` | Yes | str | Address to validate |
-| `checkContract` | No | bool | Check if address is a contract |
-| `checkAml` | No | bool | Check AML risk |
-| `checkAddressValid` | No | bool | Check address format validity |
+| Field | Required | Type    | Description                                                                                                                             |
+|-------|----------|---------|-----------------------------------------------------------------------------------------------------------------------------------------|
+| `coinKey` | Yes | str     | Coin identifier                                                                                                                         |
+| `address` | Yes | str     | Address to validate                                                                                                                     |
+| `checkContract` | No | bool | Verify contract address (If no value is provided, 'false' by default) <br>True: Verify <br>False: Not verify                            |
+| `checkAml` | No | bool | Verify AML compliance (If no value is provided or be verified, AML-compliant address by default) <br>True: Verify <br>False: Not verify |
+| `checkAddressValid` | No | bool | Verify the validity of address format (If no value is provided, 'false' by default) <br>True: Verify <br>False: Not verify              |
+| `checkSolanaOwnerAddress` | No | bool | Verify if the Solana address is the Owner address (If no value is provided, 'false' by default) <br>True: Verify <br>False: Not verify  |
 
 **Response Fields:**
 

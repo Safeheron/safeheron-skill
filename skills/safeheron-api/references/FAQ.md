@@ -407,7 +407,7 @@ A: **No difference.** TRON fee is determined by **pre-execution on-chain** — w
 
 **Q: A wallet only has ETH and USDT added, but USDC was deposited — it doesn't show. Why?**
 
-A: The USDC coin type was not added to the wallet. The balance will update once USDC is added via `createAccountCoinV2`. The deposit record may need manual reconciliation.
+A: The USDC coin type was not added to the wallet. The balance will update once USDC is added via the Add Coin API. The deposit record may need manual reconciliation.
 
 ---
 
@@ -444,7 +444,6 @@ A: The permission names below are the official labels shown in the Safeheron Con
 | Whitelist / Connect app management | "管理白名单/Connect 应用" |
 | Enable/edit custom approval flow | Owner and Admin only |
 | View audit logs | Admin and Owner only |
-| AML Checker | No special permission required |
 | Enable gas refill switch | "钱包管理" (Wallet Management) |
 | Prepay energy rental, configure alert threshold | "发起交易" (Initiate Transaction) |
 | Full scan (全量扫描) button | "管理交易策略" (Manage Transaction Policies) |

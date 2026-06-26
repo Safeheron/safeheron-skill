@@ -103,7 +103,7 @@ Add to `pom.xml`:
 <dependency>
     <groupId>com.safeheron</groupId>
     <artifactId>api-sdk-java</artifactId>
-    <version>1.0.12</version>
+    <version>1.0.14</version>
 </dependency>
 ```
 
@@ -123,7 +123,7 @@ Add to `build.gradle`:
 
 ```groovy
 dependencies {
-    implementation 'com.safeheron:api-sdk-java:1.0.12'
+    implementation 'com.safeheron:api-sdk-java:1.0.14'
 }
 ```
 
@@ -131,7 +131,7 @@ Or for `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.safeheron:api-sdk-java:1.0.12")
+    implementation("com.safeheron:api-sdk-java:1.0.14")
 }
 ```
 
@@ -186,7 +186,7 @@ import com.safeheron.client.request.CreateAccountCoinV2Request;
 import com.safeheron.client.request.CreateAccountRequest;
 import com.safeheron.client.request.ListAccountRequest;
 import com.safeheron.client.response.AccountResponse;
-import com.safeheron.client.response.CreateAccountCoinResponse;
+import com.safeheron.client.response.CreateAccountCoinV2Response;
 import com.safeheron.client.response.CreateAccountResponse;
 import com.safeheron.client.response.PageResult;
 import com.safeheron.client.utils.ServiceCreator;
@@ -222,22 +222,17 @@ public class SafeheronQuickStart {
         String accountKey = createResp.getAccountKey();
         System.out.println("Wallet created. accountKey: " + accountKey);
 
-        // ── Step 4: Add coins to the wallet ──────────────────────────────
-        // V2 supports up to 20 coins at once.
-        // Adding USDT(ERC20) automatically adds ETHEREUM_ETH as well.
+        // Step 4: Create a coin address (e.g. ETHEREUM_ETH) on the account
         CreateAccountCoinV2Request coinReq = new CreateAccountCoinV2Request();
         coinReq.setAccountKey(accountKey);
-        coinReq.setCoinKeyList(Arrays.asList(
-                "ETHEREUM_ETH",
-                "USDT(ERC20)_ETHEREUM_USDT"
-        ));
+        coinReq.setCoinKeyList(Arrays.asList("ETHEREUM_ETH"));
 
-        List<CreateAccountCoinResponse> coinResp = ServiceExecutor.execute(
+        CreateAccountCoinV2Response coinResp = ServiceExecutor.execute(
                 accountApi.createAccountCoinV2(coinReq));
 
-        System.out.println("Coins added:");
-        for (CreateAccountCoinResponse coin : coinResp) {
-            System.out.println("  " + coin.getCoinKey() + " -> " + coin.getAddress());
+        for (CreateAccountCoinV2Response.CoinAddress ca : coinResp.getCoinAddressList()) {
+            System.out.println("Coin: " + ca.getCoinKey());
+            System.out.println("Address: " + ca.getAddressList().get(0).getAddress());
         }
 
         // ── Step 5: List wallet accounts ─────────────────────────────────

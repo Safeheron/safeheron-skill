@@ -37,16 +37,25 @@ coSignerConverter := cosigner.CoSignerConverter{Config: cosigner.CoSignerConfig{
     ApprovalCallbackServicePrivateKey: "pems/callback_private.pem",
 }}
 
-// Decrypt and verify the callback request
+// Decrypt and verify the callback request (returns JSON string)
 bizContent, err := coSignerConverter.RequestV3Convert(callbackPayload)
 if err != nil {
     log.Printf("Co-Signer verification failed: %v", err)
     return
 }
 
+// Parse approvalId from the V3 envelope (bizContent is a JSON string)
+var env struct {
+    ApprovalId string `json:"approvalId"`
+}
+if err := json.Unmarshal([]byte(bizContent), &env); err != nil {
+    log.Printf("Failed to parse envelope: %v", err)
+    return
+}
+
 // Build encrypted response
 response := cosigner.CoSignerResponseV3{
-    ApprovalId: bizContent.ApprovalId,
+    ApprovalId: env.ApprovalId,
     Action:     "APPROVE", // or "REJECT"
 }
 encryptedResp, err := coSignerConverter.ResponseV3Converter(response)
@@ -108,9 +117,19 @@ func callbackHandler(w http.ResponseWriter, r *http.Request) {
     // Business validation logic
     action := evaluateTransaction(bizContent)
 
+    // Parse approvalId from the V3 envelope string
+    var env struct {
+        ApprovalId string `json:"approvalId"`
+    }
+    if err := json.Unmarshal([]byte(bizContent), &env); err != nil {
+        log.Printf("Failed to parse approvalId from envelope: %v", err)
+        http.Error(w, "Internal error", http.StatusInternalServerError)
+        return
+    }
+
     // Build encrypted response
     response := cosigner.CoSignerResponseV3{
-        ApprovalId: bizContent.ApprovalId,
+        ApprovalId: env.ApprovalId,
         Action:     action,
     }
     encryptedResp, err := coSignerConverter.ResponseV3Converter(response)
@@ -124,45 +143,80 @@ func callbackHandler(w http.ResponseWriter, r *http.Request) {
     json.NewEncoder(w).Encode(encryptedResp)
 }
 
-func evaluateTransaction(bizContent string) string {
-    // Parse the decrypted business content
-    var content map[string]interface{}
-    json.Unmarshal([]byte(bizContent), &content)
-
-    customerRefId, _ := content["customerRefId"].(string)
-
-    // 1. Verify customerRefId exists in your DB
-    order := findOrderByCustomerRefId(customerRefId)
-    if order == nil {
-        log.Printf("REJECT: unknown customerRefId %s", customerRefId)
+func evaluateTransaction(bizContentJSON string) string {
+    // V3 envelope: {approvalId, type, detail}
+    var env struct {
+        ApprovalId string          `json:"approvalId"`
+        Type       string          `json:"type"`
+        Detail     json.RawMessage `json:"detail"`
+    }
+    if err := json.Unmarshal([]byte(bizContentJSON), &env); err != nil {
+        log.Printf("REJECT: failed to parse V3 envelope: %v", err)
         return "REJECT"
     }
 
-    // 2. Verify amount matches
-    txAmount, _ := decimal.NewFromString(content["txAmount"].(string))
-    if !txAmount.Equal(order.ExpectedAmount) {
-        log.Printf("REJECT: amount mismatch for %s", customerRefId)
-        return "REJECT"
-    }
+    switch env.Type {
+    case "TRANSACTION", "TX_TRANSACTION", "CONNECT_TX_SEND", "TX_CONNECT_TX_SEND", "TRANSACTION_BATCH_UTXO":
+        var tx struct {
+            CustomerRefId      string        `json:"customerRefId"`
+            TxAmount           string        `json:"txAmount"`
+            DestinationAddress string        `json:"destinationAddress"`
+            AmlList            []struct {
+                RiskLevel string `json:"riskLevel"`
+            } `json:"amlList"`
+        }
+        if err := json.Unmarshal(env.Detail, &tx); err != nil {
+            log.Printf("REJECT: failed to parse TRANSACTION detail: %v", err)
+            return "REJECT"
+        }
 
-    // 3. Verify destination address matches
-    destAddress, _ := content["destinationAddress"].(string)
-    if destAddress != order.DestinationAddress {
-        log.Printf("REJECT: destination mismatch for %s", customerRefId)
-        return "REJECT"
-    }
+        // 1. Verify customerRefId exists in your DB
+        order := findOrderByCustomerRefId(tx.CustomerRefId)
+        if order == nil {
+            log.Printf("REJECT: unknown customerRefId %s", tx.CustomerRefId)
+            return "REJECT"
+        }
 
-    // 4. Check AML risk
-    if amlList, ok := content["amlList"].([]interface{}); ok {
-        for _, aml := range amlList {
-            amlMap, _ := aml.(map[string]interface{})
-            if riskLevel, _ := amlMap["riskLevel"].(string); riskLevel == "HIGH" {
+        // 2. Verify amount matches
+        txAmount, _ := decimal.NewFromString(tx.TxAmount)
+        if !txAmount.Equal(order.ExpectedAmount) {
+            log.Printf("REJECT: amount mismatch for %s", tx.CustomerRefId)
+            return "REJECT"
+        }
+
+        // 3. Verify destination address matches
+        if tx.DestinationAddress != order.DestinationAddress {
+            log.Printf("REJECT: destination mismatch for %s", tx.CustomerRefId)
+            return "REJECT"
+        }
+
+        // 4. Check AML risk
+        for _, aml := range tx.AmlList {
+            if aml.RiskLevel == "HIGH" || aml.RiskLevel == "SEVERE" {
+                log.Printf("REJECT: high AML risk for %s", tx.CustomerRefId)
                 return "REJECT"
             }
         }
-    }
 
-    return "APPROVE"
+        return "APPROVE"
+
+    case "MPC_SIGN":
+        // MPC raw sign — implement your MPC sign validation here
+        // e.g. verify sourceAccountKey, signAlg, hashs against your pending sign request
+        log.Printf("MPC_SIGN approval for approvalId: %s", env.ApprovalId)
+        return "APPROVE"
+
+    case "ETH_SIGN", "PERSONAL_SIGN", "ETH_SIGN_TYPED_DATA", "ETH_SIGNTRANSACTION":
+        // Web3 sign — implement your Web3 sign validation here
+        // e.g. verify subjectType, message content against your pending sign request
+        log.Printf("Web3 sign approval type=%s for approvalId: %s", env.Type, env.ApprovalId)
+        return "APPROVE"
+
+    default:
+        // Unknown type — reject by default
+        log.Printf("REJECT: unhandled callback type: %s", env.Type)
+        return "REJECT"
+    }
 }
 
 func main() {
@@ -176,13 +230,20 @@ func main() {
 
 | `type` | Description |
 |--------|-------------|
-| `TRANSACTION` | Regular transaction approval |
+| `TRANSACTION` | Regular outbound transaction approval |
+| `TX_TRANSACTION` | API-initiated transaction approval |
+| `CONNECT_TX_SEND` | WalletConnect send transaction |
+| `TX_CONNECT_TX_SEND` | API-initiated WalletConnect send |
+| `TRANSACTION_BATCH_UTXO` | Batch UTXO transaction |
 | `MPC_SIGN` | MPC raw signing approval |
-| `WEB3_SIGN` | Web3 signing approval |
+| `ETH_SIGN` | Web3 eth_sign approval |
+| `PERSONAL_SIGN` | Web3 personal_sign approval |
+| `ETH_SIGN_TYPED_DATA` | Web3 eth_signTypedData approval |
+| `ETH_SIGNTRANSACTION` | Web3 eth_signTransaction approval |
 
 ---
 
-## TRANSACTION_APPROVAL Payload (`customerContent`)
+## TRANSACTION Payload (`detail`)
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -212,14 +273,14 @@ func main() {
 
 ---
 
-## WEB3_SIGN_APPROVAL Payload (`customerContent`)
+## Web3 Payload（type: ETH_SIGN / PERSONAL_SIGN / ETH_SIGN_TYPED_DATA / ETH_SIGNTRANSACTION）
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `txKey` | String | Web3 sign request key |
 | `customerRefId` | String | Your reference ID |
 | `transactionStatus` | String | Status |
-| `subjectType` | String | `ETH_SIGN`, `PERSONAL_SIGN`, `ETH_SIGNTYPEDDATA`, `ETH_SIGNTRANSACTION` |
+| `subjectType` | String | `ETH_SIGN`, `PERSONAL_SIGN`, `ETH_SIGN_TYPED_DATA`, `ETH_SIGNTRANSACTION` |
 | `accountKey` | String | Web3 wallet account key |
 | `sourceAddress` | String | Signing address |
 | `createTime` | Long | Unix timestamp (ms) |
@@ -232,7 +293,7 @@ func main() {
 
 ---
 
-## MPC_SIGN_APPROVAL Payload (`customerContent`)
+## MPC_SIGN Payload (`detail`)
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -251,7 +312,7 @@ func main() {
 
 ## Approval Callback Response
 
-Your callback service must return an **encrypted response** using the same AES+RSA scheme, signed with your Callback Private Key:
+Your callback service must return a **signed response** signed with your Callback Private Key:
 
 ```json
 {
@@ -263,7 +324,7 @@ Your callback service must return an **encrypted response** using the same AES+R
 | Field | Type | Values |
 |-------|------|--------|
 | `action` | String | `APPROVE` or `REJECT` |
-| `approvalId` | String | Echo back the incoming `txKey` |
+| `approvalId` | String | Echo back the incoming `approvalId` |
 
 ---
 

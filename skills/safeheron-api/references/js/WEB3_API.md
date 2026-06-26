@@ -155,7 +155,8 @@ const sig = result.messageHash.sigList[0].sig;
 const sig = result.message.sig.sig;
 
 // For ethSignTransaction:
-const signedTx = result.transaction.sig.sig;  // hex-encoded signature
+const signedTx = result.transaction.signedTransaction;  // RLP-encoded signed transaction (ready to broadcast)
+const txHash = result.transaction.txHash;               // transaction hash
 ```
 
 ---
@@ -218,7 +219,7 @@ const list = await web3Api.listWeb3Sign({
 | `sourceAddress` | string | Signing address |
 | `transactionStatus` | string | `SUBMITTED`, `SIGNING`, `SIGN_COMPLETED`, `FAILED`, `REJECTED`, `CANCELLED` |
 | `transactionSubStatus` | string | Detailed sub-status |
-| `subjectType` | string | `ETH_SIGN`, `PERSONAL_SIGN`, `ETH_SIGNTYPEDDATA`, `ETH_SIGNTRANSACTION` |
+| `subjectType` | string | `ETH_SIGN`, `PERSONAL_SIGN`, `ETH_SIGN_TYPED_DATA`, `ETH_SIGNTRANSACTION` |
 | `customerRefId` | string | Your reference ID |
 | `messageHash` | object | For ethSign -- contains `chainId`, `sigList` |
 | `message` | object | For personalSign / ethSignTypedData -- contains `chainId`, `data`, `sig` |
