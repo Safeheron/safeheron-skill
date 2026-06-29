@@ -270,18 +270,13 @@ for (let i = 0; i < 30; i++) {
   await new Promise(resolve => setTimeout(resolve, 2000));
 }
 
-// Step 3: Block high-risk addresses
+// Step 3: Handle each riskLevel according to your own business logic
 for (const order of result.orders) {
-  if (order.riskLevel === 'HIGH' || order.riskLevel === 'SEVERE') {
-    throw new Error(`Address is ${order.riskLevel} risk: ${destinationAddress}`);
-  }
+  const riskLevel = order.riskLevel;
+  // Decide what to do based on riskLevel (LOW / MEDIUM / HIGH / SEVERE / UNKNOWN).
+  // For example, block HIGH/SEVERE, require manual review for MEDIUM, allow LOW, etc.
+  // Implement the subsequent business logic (block, alert, proceed with transaction, ...) yourself.
 }
-
-// Step 4: Proceed with transaction
-await transactionApi.createTransactions({
-  destinationAddress,
-  // ... set other fields
-});
 ```
 
 ---

@@ -282,15 +282,13 @@ for i in range(30):
         break
     time.sleep(2)
 
-# Step 3: Block high-risk addresses
+# Step 3: Handle each riskLevel according to your own business logic
 for order in result.get('orders', []):
-    if order.get('riskLevel') in ('HIGH', 'SEVERE'):
-        raise RuntimeError(f"Address is {order['riskLevel']} risk: {destination_address}")
-
-# Step 4: Proceed with transaction
-tx_param = CreateTransactionRequest()
-tx_param.destinationAddress = destination_address
-# ... set other fields
+    risk_level = order.get('riskLevel')
+    # Decide what to do based on risk_level (LOW / MEDIUM / HIGH / SEVERE / UNKNOWN).
+    # For example, block HIGH/SEVERE, require manual review for MEDIUM, allow LOW, etc.
+    # Implement the subsequent business logic (block, alert, proceed with transaction, ...) yourself.
+    ...
 ```
 
 ---

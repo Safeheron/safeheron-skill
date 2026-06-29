@@ -290,17 +290,13 @@ for (int i = 0; i < 30; i++) {
     Thread.sleep(2000);
 }
 
-// Step 3: Block high-risk addresses
+// Step 3: Handle each riskLevel according to your own business logic
 for (KyaScreeningOneResponse.Order order : result.getOrders()) {
-    if ("HIGH".equals(order.getRiskLevel()) || "SEVERE".equals(order.getRiskLevel())) {
-        throw new SecurityException("Address is " + order.getRiskLevel() + " risk: " + destinationAddress);
-    }
+    String riskLevel = order.getRiskLevel();
+    // Decide what to do based on riskLevel (LOW / MEDIUM / HIGH / SEVERE / UNKNOWN).
+    // For example, block HIGH/SEVERE, require manual review for MEDIUM, allow LOW, etc.
+    // Implement the subsequent business logic (block, alert, proceed with transaction, ...) yourself.
 }
-
-// Step 4: Proceed with transaction
-CreateTransactionRequest txReq = new CreateTransactionRequest();
-txReq.setDestinationAddress(destinationAddress);
-// ... set other fields
 ```
 
 ---

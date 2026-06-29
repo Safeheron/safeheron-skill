@@ -309,17 +309,13 @@ for i := 0; i < 30; i++ {
     time.Sleep(2 * time.Second)
 }
 
-// Step 3: Block high-risk addresses
+// Step 3: Handle each riskLevel according to your own business logic
 for _, order := range result.Orders {
-    if order.RiskLevel == "HIGH" || order.RiskLevel == "SEVERE" {
-        panic(fmt.Sprintf("Address is %s risk: %s", order.RiskLevel, destinationAddress))
-    }
-}
-
-// Step 4: Proceed with transaction
-txReq := api.CreateTransactionsRequest{
-    DestinationAddress: destinationAddress,
-    // ... set other fields
+    riskLevel := order.RiskLevel
+    // Decide what to do based on riskLevel (LOW / MEDIUM / HIGH / SEVERE / UNKNOWN).
+    // For example, block HIGH/SEVERE, require manual review for MEDIUM, allow LOW, etc.
+    // Implement the subsequent business logic (block, alert, proceed with transaction, ...) yourself.
+    _ = riskLevel
 }
 ```
 
