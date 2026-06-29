@@ -284,7 +284,7 @@ Chains that do NOT support speed-up: NEAR, SUI, TRON, SOL, TON.
 
 ### At withdrawal time (before submitting to Safeheron):
 - Run destination address through your internal risk engine
-- Optionally use the Safeheron Tools API (AML address checker) -- see [TOOLS_API.md](TOOLS_API.md)
+- Optionally use KYA address screening via `ComplianceApi` -- see [COMPLIANCE_API.md](COMPLIANCE_API.md)
 - Reject withdrawals to high-risk or blacklisted addresses before they reach Safeheron
 
 ### Via Safeheron's built-in AML:

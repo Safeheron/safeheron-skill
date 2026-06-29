@@ -77,7 +77,7 @@ Algorithm: AES/GCM/NoPadding
 → Yields plaintext JSON response
 ```
 
-> All four SDKs (Java, JS/TS, Go, Python) automatically handle request signing, payload encryption, and response signature verification — these steps are built-in and non-optional. Manual implementation is only needed if you are calling the API directly without an SDK.
+> All SDK clients automatically handle request signing, payload encryption, and response signature verification — these steps are built-in and non-optional. Manual implementation is only needed if you are calling the API directly without an SDK.
 
 ---
 
@@ -89,7 +89,7 @@ openssl genpkey -out api_private.pem -algorithm RSA -pkeyopt rsa_keygen_bits:409
 # Export public key (upload to Safeheron Console)
 openssl rsa -in api_private.pem -out api_public.pem -pubout
 
-# Convert to PKCS8 (use base64 content as rsaPrivateKey in SafeheronConfig builder)
+# Convert to PKCS8 (use base64 content as rsaPrivateKey)
 openssl pkcs8 -topk8 -inform PEM -outform PEM -nocrypt -in api_private.pem -out api_pkcs8.pem
 ```
 

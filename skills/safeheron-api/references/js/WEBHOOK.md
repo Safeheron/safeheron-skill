@@ -30,7 +30,7 @@ Webhook payloads use the **same AES+RSA encryption scheme** as API responses. Th
 ### Decryption Steps
 
 1. Build signature string: sort all fields by key ascending (exclude `rsaType`, `aesType`):
-   `bizContent=...&code=...&key=...&timestamp=...`
+   `bizContent=...&key=...&timestamp=...`
 2. Verify `sig` using **Safeheron's RSA public key** -- reject if invalid.
 3. Decrypt `key` field using **your RSA private key** -> 48 bytes (AES key + IV).
 4. Decrypt `bizContent` using AES/GCM/NoPadding -> plaintext JSON event payload.
@@ -66,7 +66,7 @@ app.use(express.json());
 app.post('/safeheron/webhook', (req, res) => {
   try {
     // convertWebHook() handles everything internally:
-    //   1. Verifies RSA signature -- throws SafeheronError if invalid
+    //   1. Verifies RSA signature -- throws Error if invalid
     //   2. Decrypts AES key using your RSA private key
     //   3. Decrypts bizContent
     const decryptedContent = converter.convertWebHook(req.body);
@@ -130,8 +130,11 @@ app.post('/safeheron/webhook', (req, res) => {
 | `sourceAddress` | string | Sender address |
 | `destinationAddress` | string | Recipient address |
 | `txFee` | string | Transaction fee paid |
+| `blockHeight` | number | Confirmed block height |
 | `createTime` | number | Unix timestamp (ms) |
 | `completedTime` | number | Unix timestamp (ms) of completion |
+| `customerExt1` | string | Custom field 1 |
+| `customerExt2` | string | Custom field 2 |
 | `amlLock` | string | AML status: `YES` / `NO` |
 
 ---
@@ -185,8 +188,8 @@ Re-pushes only the **most recent** webhook event for a given transaction (not fu
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `category` | string | No | `TRANSACTION` / `MPC_SIGN` / `WEB3_SIGN` |
-| `txKey` | string | No | Transaction key |
+| `category` | string | Yes | `TRANSACTION` / `MPC_SIGN` / `WEB3_SIGN` |
+| `txKey` | string | Yes | Transaction key |
 
 ```typescript
 import { WebhookApi } from '@safeheron/api-sdk';
@@ -201,7 +204,7 @@ await webhookApi.resendWebhook({
 
 ### `resendFailed` — Re-push all failed events in a time range
 
-Re-pushes every failed webhook event within a time window (max 1 hour). Rate-limited to once every 10 minutes.
+Re-pushes every failed webhook event within a time window (max 1 hour). Rate-limited to once every 10 minutes. Only webhooks from the **past 7 days** can be resent — requests with timestamps older than 7 days will silently return empty results.
 
 > **Warning:** Your handler must be idempotent. `resendFailed` may re-deliver intermediate-status events (e.g. `CONFIRMING`) even if you already received a terminal status (`COMPLETED`). Never roll back a terminal state.
 
@@ -240,7 +243,7 @@ Configure custom confirmation thresholds per blockchain in Safeheron Console. On
 
 ### 1. Verify Signature Before Processing (Mandatory)
 
-Every webhook payload **must be signature-verified** before any business logic runs. The SDK's `WebHookConverter.convertWebHook()` handles this automatically -- it throws `SafeheronError` on invalid signatures.
+Every webhook payload **must be signature-verified** before any business logic runs. The SDK's `WebHookConverter.convertWebHook()` handles this automatically -- it throws `Error` on invalid signatures.
 
 ### 2. IP Whitelist -- Only Accept Safeheron's Egress IPs
 
@@ -271,10 +274,10 @@ Safeheron may deliver the same event multiple times (retry on non-200). Always c
 
 ```typescript
 const minDeposit = getMinimumDepositAmount(coinKey);
-const txAmount = parseFloat(event.txAmount);
+const txAmount = new Decimal(event.txAmount);  // use Decimal to avoid float precision loss
 
-if (txAmount < minDeposit) {
-  console.log(`Ignoring dust deposit: ${txAmount} ${coinKey} (below minimum ${minDeposit})`);
+if (txAmount.lessThan(minDeposit)) {
+  console.log(`Ignoring dust deposit: ${event.txAmount} ${coinKey} (below minimum ${minDeposit})`);
   return;
 }
 ```

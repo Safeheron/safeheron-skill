@@ -61,7 +61,6 @@ whitelistKey := resp.WhitelistKey // save this -- permanent identifier
 | `Solana` | Solana |
 | `Bitcoin Testnet` | Bitcoin testnet |
 | `TON` | TON mainnet |
-| `TON_TESTNET` | TON testnet |
 
 ---
 
@@ -114,6 +113,15 @@ if err := whitelistApi.EditWhitelist(req, &resp); err != nil {
 }
 ```
 
+### EditWhitelistRequest Fields
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `WhitelistKey` | Yes | `string` | Unique identifier of the whitelist entry to edit |
+| `WhitelistName` | Yes | `string` | New display name (max 20 chars) |
+| `address` | Yes | `string` | Public blockchain address and the address format needs to meet the requirements of the chain |
+| `memo` | No | `string` | The memo (up to 20 characters) for the public blockchain address, also known as a comment or tag. This parameter is only valid for the following public blockchain types (chainType):TON: TON mainnet |
+| `force` | No | `bool` | When the whitelist is involved in a transaction approval policy, modifications will result in the new whitelist being directly applied to the approval policy. False by default, meaning that when involved in a transaction approval policy, it will not be modified |
 ---
 
 ## Delete a Whitelist Entry

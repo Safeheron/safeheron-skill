@@ -64,16 +64,28 @@ customer_ref_id = str(uuid.uuid4())
 `ONE_TIME_ADDRESS` must only be used for genuinely temporary, one-off payment scenarios.
 
 **2-3. AML check is mandatory before every transfer.**
+Use KYA screening via `ComplianceApi` to screen the destination address before creating the transaction.
 
 ```python
-from safeheron_api_sdk_python.api.tools_api import ToolsApi, AmlCheckerRequestRequest
+from safeheron_api_sdk_python.api.compliance_api import ComplianceApi, CreateKyaScreeningRequest, KyaScreeningOneRequest
+import time
 
-tools_api = ToolsApi(config)
-param = AmlCheckerRequestRequest()
-param.network = 'Ethereum'
-param.address = destination_address
-resp = tools_api.aml_checker_request(param)
-# Poll for result and block high-risk addresses
+screen_param = CreateKyaScreeningRequest()
+screen_param.address = destination_address
+screen_param.chainType = 'ETH'
+screen_param.providers = ['Chainalysis']
+created = compliance_api.create_kya_screening(screen_param)
+
+poll_param = KyaScreeningOneRequest()
+poll_param.screenId = created['screenId']
+for i in range(30):
+    result = compliance_api.kya_screening_one(poll_param)
+    if result.get('status') == 'FINISHED':
+        break
+    time.sleep(2)
+for order in result.get('orders', []):
+    if order.get('riskLevel') in ('HIGH', 'SEVERE'):
+        raise RuntimeError(f"AML check failed: {destination_address} is {order['riskLevel']} risk")
 ```
 
 **2-4. Validate address format before whitelist add or transfer.**
@@ -131,7 +143,7 @@ def handle_callback():
 
     # 1. Decrypt and verify signature (always first)
     biz_content = converter.request_v3_convert(raw_body)
-    tx = biz_content.get('customerContent', {})
+    tx = biz_content.get('detail', {})
 
     # 2. Look up the business order
     order = find_order_by_ref_id(tx.get('customerRefId'))
@@ -225,7 +237,7 @@ Call the transaction query API periodically to catch missed events.
 |---|---|
 | Private keys | Vault/KMS only; never plaintext |
 | Transfer addresses | Whitelist required; ONE_TIME_ADDRESS only for truly one-off payments |
-| AML check | Mandatory before every outbound transfer via ToolsApi |
+| AML check | Mandatory before every outbound transfer via ComplianceApi KYA screening |
 | Address validation | Mandatory before whitelist add or transfer via CoinApi.check_coin_address() |
 | Amounts | str in API, Decimal in code; never float |
 | Co-Signer callback | Validate customerRefId + amount + address against business system |

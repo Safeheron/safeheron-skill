@@ -78,7 +78,7 @@ req.setAccountKey(web3AccountKey);
 
 CreateWeb3EthSignTypedDataRequest.Message message = new CreateWeb3EthSignTypedDataRequest.Message();
 message.setChainId(1L);
-message.setVersion("v4");  // "v1", "v3", or "v4"
+message.setVersion("ETH_SIGNTYPEDDATA_V4");  // ETH_SIGNTYPEDDATA_V1, ETH_SIGNTYPEDDATA_V3, or ETH_SIGNTYPEDDATA_V4
 message.setData("{\"types\":{\"EIP712Domain\":[...]}, \"domain\":{...}, \"message\":{...}}");
 req.setMessage(message);
 
@@ -90,9 +90,9 @@ String txKey = resp.getTxKey();
 
 | Value | Standard |
 |-------|----------|
-| `v1` | Legacy typed signing |
-| `v3` | EIP-712 draft |
-| `v4` | EIP-712 (MetaMask current default) |
+| `ETH_SIGNTYPEDDATA_V1` | Legacy typed signing |
+| `ETH_SIGNTYPEDDATA_V3` | EIP-712 draft |
+| `ETH_SIGNTYPEDDATA_V4` | EIP-712 (MetaMask current default) |
 
 ---
 
@@ -211,7 +211,7 @@ Own fields:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `subjectType` | String | Web3 sign type (e.g. `ETH_SIGN`, `PERSONAL_SIGN`, `ETH_SIGNTYPEDDATA`, `ETH_SIGNTRANSACTION`) |
+| `subjectType` | String | Web3 sign type (e.g. `ETH_SIGN`, `PERSONAL_SIGN`, `ETH_SIGN_TYPED_DATA`, `ETH_SIGNTRANSACTION`) |
 | `transactionStatus` | `List<String>` | Filter by status list |
 | `accountKey` | String | Source account key |
 | `createTimeMin` | Long | Start time, UNIX timestamp (ms); default: `createTimeMax` minus 24h |
@@ -228,7 +228,7 @@ Own fields:
 | `sourceAddress` | String | Signing address |
 | `transactionStatus` | String | `SUBMITTED`, `SIGNING`, `SIGN_COMPLETED`, `FAILED`, `REJECTED`, `CANCELLED` |
 | `transactionSubStatus` | String | Detailed sub-status |
-| `subjectType` | String | `ETH_SIGN`, `PERSONAL_SIGN`, `ETH_SIGNTYPEDDATA`, `ETH_SIGNTRANSACTION` |
+| `subjectType` | String | `ETH_SIGN`, `PERSONAL_SIGN`, `ETH_SIGN_TYPED_DATA`, `ETH_SIGNTRANSACTION` |
 | `customerRefId` | String | Your reference ID |
 | `createTime` | Long | Unix timestamp (ms) |
 | `messageHash` | Object | For ethSign — contains `chainId`, `sigList` |

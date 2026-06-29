@@ -69,7 +69,6 @@ from safeheron_api_sdk_python.api.whitelist_api import WhitelistApi
 from safeheron_api_sdk_python.api.coin_api import CoinApi
 from safeheron_api_sdk_python.api.compliance_api import ComplianceApi
 from safeheron_api_sdk_python.api.gas_api import GasApi
-from safeheron_api_sdk_python.api.tools_api import ToolsApi
 from safeheron_api_sdk_python.api.webhook_api import WebhookApi
 
 account_api     = AccountApi(config)
@@ -80,7 +79,6 @@ whitelist_api   = WhitelistApi(config)
 coin_api        = CoinApi(config)
 compliance_api  = ComplianceApi(config)
 gas_api         = GasApi(config)
-tools_api       = ToolsApi(config)
 webhook_api     = WebhookApi(config)
 ```
 

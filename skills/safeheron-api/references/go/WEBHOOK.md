@@ -30,7 +30,7 @@ Webhook payloads use the **same AES+RSA encryption scheme** as API responses. Th
 ### Decryption Steps
 
 1. Build signature string: sort all fields by key ascending (exclude `rsaType`, `aesType`):
-   `bizContent=...&code=...&key=...&timestamp=...`
+   `bizContent=...&key=...&timestamp=...`
 2. Verify `sig` using **Safeheron's RSA public key** -- reject if invalid.
 3. Decrypt `key` field using **your RSA private key** -> 48 bytes (AES key + IV).
 4. Decrypt `bizContent` using AES/GCM/NoPadding -> plaintext JSON event payload.
@@ -178,8 +178,15 @@ func main() {
 | `coinKey` | `string` | Coin identifier |
 | `txAmount` | `string` | Amount (string) |
 | `sourceAccountKey` | `string` | Sender wallet |
+| `sourceAddress` | `string` | Sender address |
 | `destinationAddress` | `string` | Recipient address |
+| `txFee` | `string` | Transaction fee paid |
+| `blockHeight` | `int64` | Confirmed block height |
 | `createTime` | `int64` | Unix timestamp (ms) |
+| `completedTime` | `int64` | Unix timestamp (ms) of completion |
+| `customerExt1` | `string` | Custom field 1 |
+| `customerExt2` | `string` | Custom field 2 |
+| `amlLock` | `string` | AML status: `YES` / `NO` |
 
 ---
 
@@ -248,7 +255,7 @@ err := webhookApi.ResendWebhook(resendReq, &resendResp)
 
 ### `ResendFailed` — Re-push all failed events in a time range
 
-Re-pushes every failed webhook event within a time window (max 1 hour). Rate-limited to once every 10 minutes.
+Re-pushes every failed webhook event within a time window (max 1 hour). Rate-limited to once every 10 minutes. Only webhooks from the **past 7 days** can be resent — requests with timestamps older than 7 days will silently return empty results.
 
 > **Warning:** Your handler must be idempotent. `ResendFailed` may re-deliver intermediate-status events (e.g. `CONFIRMING`) even if you already received a terminal status (`COMPLETED`). Never roll back a terminal state.
 

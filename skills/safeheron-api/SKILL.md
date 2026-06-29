@@ -4,7 +4,7 @@ description: >
   Use when working with Safeheron API to set up from scratch, manage wallet accounts,
   create transactions, handle MPC signing, interact with Web3 wallet operations,
   manage whitelists, process webhooks, use Gas Station, perform AML/compliance checks,
-  use Tools API, or handle API Co-Signer callbacks — in Java, JavaScript/TypeScript,
+  or handle API Co-Signer callbacks — in Java, JavaScript/TypeScript,
   Go, or Python.
 ---
 
@@ -38,7 +38,6 @@ Covers all 5 onboarding steps:
 ### Transfer & Whitelist Security
 - [ ] **`customerRefId` first** — Generate and persist `customerRefId` to your DB **before** calling any Safeheron create API. On timeout, retry with the same ID. Error `9001` = already exists, query instead of recreating.
 - [ ] **Whitelist addresses for formal transfers** — `ONE_TIME_ADDRESS` must only be used for genuinely temporary, one-off payments. All recurring or formal transfers (exchange hot wallets, partner addresses, internal accounts) require a whitelisted address.
-- [ ] **AML check before every transfer** — Call the Tools API to screen the destination address before creating any outbound transaction. Intercept or alert on high-risk addresses.
 - [ ] **Validate address format** — Call the coin address validation endpoint before adding an address to the whitelist or initiating a transfer. Never trust user-supplied address strings directly.
 - [ ] **Amounts: String in API, decimal type in code** — Never use `float` or `double` for monetary values. API request fields use `String`; application-side calculations use an arbitrary-precision decimal type (Java: `BigDecimal`; Python: `Decimal`; JS/TS: keep as `string` or use `decimal.js`; Go: `string` or `shopspring/decimal`).
 - [ ] **`failOnAml: true` by default** — Only disable when the business case is explicitly confirmed.
@@ -56,6 +55,9 @@ Covers all 5 onboarding steps:
 - [ ] **No status rollback; terminal state wins** — If the current DB status is already `COMPLETED`, `FAILED`,`CANCELLED`, or `REJECTED`, discard any later-arriving event for that transaction — even if it carries an intermediate status (out-of-order delivery is possible).
 - [ ] **Webhook IP whitelist** — Only accept webhook traffic from Safeheron's egress IPs: `18.162.105.64`, `18.167.22.59`, `18.167.21.182`
 - [ ] **Webhook + REST API polling** — Always implement both: Webhook as primary, REST API polling as fallback. Call `/v1/transactions/one` periodically to re-request failed deliveries.
+
+### Compliance & AML
+- [ ] **KYA pre-screening before transfer** — For any regulated or high-value transfer, call `kyaScreeningCreate` to screen the destination address **before** initiating the transaction. Do not rely solely on post-transaction KYT reports.
 
 ### Policy & Operational Alerts
 - [ ] **Policy: least privilege** — API Keys, approval policies, and server permissions must be scoped to the minimum required.
@@ -92,7 +94,7 @@ Covers all 5 onboarding steps:
 
 | Language | Install                                            |
 |----------|----------------------------------------------------|
-| Java | `com.safeheron:api-sdk-java:1.0.12` (Maven)        |
+| Java | `com.safeheron:api-sdk-java:1.0.14` (Maven)        |
 | JS/TS | `npm install @safeheron/api-sdk`                   |
 | Go | `go get github.com/Safeheron/safeheron-api-sdk-go` |
 | Python | `pip install safeheron-api-sdk-python`             |
@@ -115,7 +117,6 @@ Covers all 5 onboarding steps:
 | Whitelist | Whitelist address CRUD |
 | Compliance | AML/KYT compliance reports |
 | Gas | Gas Station status & auto top-up |
-| Tools | AML address risk check |
 | Webhook | Event subscription & handling |
 
 For language-specific class names and call patterns, see `references/{lang}/WALLET_API.md` etc.
@@ -144,7 +145,6 @@ For language-specific class names and call patterns, see `references/{lang}/WALL
 | Whitelist CRUD | references/{lang}/WHITELIST_API.md                                       |
 | Compliance / KYT report | references/{lang}/COMPLIANCE_API.md                                      |
 | Gas Station status & auto top-up | references/{lang}/GAS_API.md                                             |
-| Tools API — AML address checker | references/{lang}/TOOLS_API.md                                           |
 | Webhook events, handler, re-push | references/{lang}/WEBHOOK.md                                             |
 | API Co-Signer / Approval Callback + security deployment | references/{lang}/COSIGNER.md                                            |
 | Error codes & troubleshooting | references/{lang}/ERROR_CODES.md                                         |

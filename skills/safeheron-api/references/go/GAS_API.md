@@ -30,8 +30,11 @@ gasApi := api.GasApi{Client: sc}
 ## Retrieve Gas Station Balance
 
 ```go
+req := api.GasStatusRequest{
+    // NetworkMode: "...",  // optional: filter by network mode
+}
 var resp api.GasStatusResponse
-if err := gasApi.GasStatus(&resp); err != nil {
+if err := gasApi.GasStatus(req, &resp); err != nil {
     panic(fmt.Errorf("failed to get gas status: %w", err))
 }
 
@@ -43,6 +46,12 @@ for _, cfg := range resp.Configuration {
     fmt.Printf("Network: %s, AutoRefill: %v\n", cfg.Network, cfg.Enabled)
 }
 ```
+
+### GasStatusRequest Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `NetworkMode` | `string` | Optional. Filter by network mode. |
 
 ### GasStatusResponse Structure
 
@@ -83,7 +92,7 @@ if err := gasApi.GasTransactionsGetByTxKey(req, &resp); err != nil {
 |-------|------|-------------|
 | `TxKey` | `string` | The queried transaction key |
 | `Symbol` | `string` | Transaction fee coin |
-| `TotalAmount` | `string` | Total fee amount across all records |
+| `TotalAmount` | `string` | Total fee amount. A single transaction may have multiple Gas records; the total fee paid is the sum of all records with SUCCESS and FAILURE_GAS_CONSUMED statuses. |
 | `DetailList` | `[]Detail` | Gas refill records |
 
 **Detail Fields:**

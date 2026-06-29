@@ -30,7 +30,7 @@ Webhook payloads use the **same AES+RSA encryption scheme** as API responses. Th
 ### Decryption Steps (same as API response decryption)
 
 1. Build signature string: sort all fields by key ascending (exclude `rsaType`, `aesType`):
-   `bizContent=...&code=...&key=...&timestamp=...`
+   `bizContent=...&key=...&timestamp=...`
 2. Verify `sig` using **Safeheron's RSA public key** -- reject if invalid.
 3. Decrypt `key` field using **your RSA private key** -> 48 bytes (AES key + IV).
 4. Decrypt `bizContent` using AES/GCM/NoPadding -> plaintext JSON event payload.
@@ -98,6 +98,9 @@ def handle_webhook():
         elif event_type == 'GAS_BALANCE_WARNING':
             alert_ops_team("Gas balance warning", biz_content)
 
+        elif event_type == 'AML_KYT_ALERT':
+            alert_ops_team("KYT alert notification", biz_content)
+
     except Exception as e:
         app.logger.error(f"Webhook processing error: {e}")
 
@@ -158,6 +161,11 @@ def alert_ops_team(msg, event):
 | `sourceAccountKey` | str | Sender wallet |
 | `sourceAddress` | str | Sender address |
 | `destinationAddress` | str | Recipient address |
+| `txFee` | str | Transaction fee paid |
+| `blockHeight` | int | Confirmed block height |
+| `completedTime` | int | Unix timestamp (ms) of completion |
+| `customerExt1` | str | Custom field 1 |
+| `customerExt2` | str | Custom field 2 |
 | `amlLock` | str | AML status: `YES` / `NO` |
 
 ---
@@ -238,7 +246,7 @@ webhook_api.resend_webhook(req)
 
 ### `resend_failed` — Re-push all failed events in a time range
 
-Re-pushes every failed webhook event within a time window (max 1 hour). Rate-limited to once every 10 minutes.
+Re-pushes every failed webhook event within a time window (max 1 hour). Rate-limited to once every 10 minutes. Only webhooks from the **past 7 days** can be resent — requests with timestamps older than 7 days will silently return empty results.
 
 > **Warning:** Your handler must be idempotent. `resend_failed` may re-deliver intermediate-status events (e.g. `CONFIRMING`) even if you already received a terminal status (`COMPLETED`). Never roll back a terminal state.
 

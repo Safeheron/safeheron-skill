@@ -57,24 +57,29 @@ req.setDestinationAccountType("WHITELISTING_ACCOUNT");
 ```
 
 **2-3. AML check is mandatory before every transfer.**
-Call `ToolsApiService` to screen the destination address. Intercept or alert on high-risk addresses before creating the transaction.
+Use KYA screening via `ComplianceApiService` to screen the destination address. Block or alert on HIGH/SEVERE risk results before creating the transaction.
 
 ```java
 // Required before creating any outbound transaction
-// Step 1: Submit AML check request
-ToolsApiService toolsApi = ServiceCreator.create(ToolsApiService.class, config);
-AmlCheckerRequestRequest amlReq = new AmlCheckerRequestRequest();
-amlReq.setNetwork("Ethereum");   // "Bitcoin" | "Ethereum" | "Tron"
-amlReq.setAddress(destinationAddress);
-AmlCheckerRequestResponse amlRequestResp = ServiceExecutor.execute(toolsApi.amlCheckerRequest(amlReq));
-String requestId = amlRequestResp.getRequestId();
+ComplianceApiService complianceApi = ServiceCreator.create(ComplianceApiService.class, config);
+KyaScreeningRequest kyaReq = new KyaScreeningRequest();
+kyaReq.setAddress(destinationAddress);
+kyaReq.setChainType("ETH");
+kyaReq.setProviders(Arrays.asList("Chainalysis"));
+KyaScreeningCreateResponse created = ServiceExecutor.execute(complianceApi.kyaScreeningCreate(kyaReq));
 
-// Step 2: Retrieve result (poll until status is ready)
-AmlCheckerRetrievesRequest retrievesReq = new AmlCheckerRetrievesRequest();
-retrievesReq.setRequestId(requestId);
-AmlCheckerRetrievesResponse amlResp = ServiceExecutor.execute(toolsApi.amlCheckerRetrieves(retrievesReq));
-if (Boolean.TRUE.equals(amlResp.getIsMaliciousAddress())) {
-    throw new SecurityException("AML check failed for address: " + destinationAddress);
+KyaScreeningOneRequest pollReq = new KyaScreeningOneRequest();
+pollReq.setScreenId(created.getScreenId());
+KyaScreeningOneResponse result = null;
+for (int i = 0; i < 30; i++) {
+    result = ServiceExecutor.execute(complianceApi.kyaScreeningOne(pollReq));
+    if ("FINISHED".equals(result.getStatus())) break;
+    Thread.sleep(2000);
+}
+for (KyaScreeningOneResponse.Order order : result.getOrders()) {
+    if ("HIGH".equals(order.getRiskLevel()) || "SEVERE".equals(order.getRiskLevel())) {
+        throw new SecurityException("AML check failed: " + destinationAddress + " is " + order.getRiskLevel() + " risk");
+    }
 }
 ```
 
@@ -122,30 +127,45 @@ Every approval callback must implement the following business validations before
 ```java
 // REQUIRED pattern for Co-Signer approval callback
 @PostMapping("/cosigner/callback")
-public ApprovalResponse handleCallback(@RequestBody CallbackRequest request) {
-    // 1. Decrypt and verify signature (always first)
-    CallbackPayload payload = decryptAndVerify(request);
+public Map<String,String> handleCallback(@RequestBody CoSignerCallBackV3 encryptedBody) throws Exception {
+    // 1. Decrypt and verify signature using Co-Signer identity public key
+    CoSignerBizContentV3 bizContent = coSignerConverter.requestV3Convert(encryptedBody);
+
+    // Default response — always REJECT unless all checks pass
+    CoSignerResponseV3 response = new CoSignerResponseV3();
+    response.setApprovalId(bizContent.getApprovalId());
+    response.setAction("REJECT");
+
+    if (!"TRANSACTION".equals(bizContent.getType()) && !"TX_TRANSACTION".equals(bizContent.getType())) {
+        log.warn("Unhandled callback type: {}", bizContent.getType());
+        return coSignerConverter.responseV3Converter(response);
+    }
+
+    // Parse the transaction detail from the V3 envelope
+    TransactionApproval tx = parseTransactionDetail(bizContent.getDetail());
 
     // 2. Look up the business order
-    BusinessOrder order = orderService.findByCustomerRefId(payload.getCustomerRefId());
+    BusinessOrder order = orderService.findByCustomerRefId(tx.getCustomerRefId());
     if (order == null) {
-        log.warn("Unknown customerRefId: {}", payload.getCustomerRefId());
-        return ApprovalResponse.reject("Unknown order");
+        log.warn("REJECT: unknown customerRefId {}", tx.getCustomerRefId());
+        return coSignerConverter.responseV3Converter(response);
     }
 
     // 3. Validate amount matches business system
-    if (!order.getAmount().equals(new BigDecimal(payload.getAmount()))) {
-        log.warn("Amount mismatch: expected={}, actual={}", order.getAmount(), payload.getAmount());
-        return ApprovalResponse.reject("Amount mismatch");
+    if (new BigDecimal(tx.getTxAmount()).compareTo(order.getExpectedAmount()) != 0) {
+        log.warn("REJECT: amount mismatch for {}", tx.getCustomerRefId());
+        return coSignerConverter.responseV3Converter(response);
     }
 
-    // 4. Validate destination address matches business system
-    if (!order.getDestinationAddress().equalsIgnoreCase(payload.getDestinationAddress())) {
-        log.warn("Address mismatch: expected={}, actual={}", order.getDestinationAddress(), payload.getDestinationAddress());
-        return ApprovalResponse.reject("Address mismatch");
+    // 4. Validate destination address matches
+    if (!tx.getDestinationAddress().equalsIgnoreCase(order.getDestinationAddress())) {
+        log.warn("REJECT: destination mismatch for {}", tx.getCustomerRefId());
+        return coSignerConverter.responseV3Converter(response);
     }
 
-    return ApprovalResponse.approve();
+    // All checks passed — approve
+    response.setAction("APPROVE");
+    return coSignerConverter.responseV3Converter(response);
 }
 ```
 
@@ -223,7 +243,7 @@ private boolean isTerminalStatus(String status) {
 Do not rely solely on Webhooks for transaction state synchronization. Run a periodic polling job against the transaction list API to catch any missed events.
 
 **4-8. Handle failed Webhook re-delivery.**
-Call `/v1/transactions/one` periodically to re-request delivery of events that failed to reach your server.
+Call `/v1/webhook/resend` periodically to re-request delivery of events that failed to reach your server.
 
 ---
 
@@ -254,7 +274,7 @@ Call `/v1/transactions/one` periodically to re-request delivery of events that f
 |---|---|
 | Private keys | Vault/KMS only; never plaintext |
 | Transfer addresses | Whitelist required; ONE_TIME_ADDRESS only for truly one-off payments |
-| AML check | Mandatory before every outbound transfer via ToolsApiService |
+| AML check | Mandatory before every outbound transfer via ComplianceApiService KYA screening |
 | Address validation | Mandatory before whitelist add or transfer via CoinApiService.checkCoinAddress() |
 | Amounts | String in API, BigDecimal in code; never float/double |
 | Co-Signer callback | Validate customerRefId + amount + address against business system |

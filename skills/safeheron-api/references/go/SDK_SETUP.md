@@ -79,7 +79,6 @@ whitelistApi   := api.WhitelistApi{Client: sc}
 coinApi        := api.CoinApi{Client: sc}
 complianceApi  := api.ComplianceApi{Client: sc}
 gasApi         := api.GasApi{Client: sc}
-toolsApi       := api.ToolsApi{Client: sc}
 webhookApi     := api.WebhookApi{Client: sc}
 ```
 

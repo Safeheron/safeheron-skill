@@ -13,7 +13,7 @@ The `GasApi` provides:
 ## Imports
 
 ```python
-from safeheron_api_sdk_python.api.gas_api import GasApi, GasTransactionsGetByTxKeyRequest
+from safeheron_api_sdk_python.api.gas_api import GasApi, GasStatusRequest, GasTransactionsGetByTxKeyRequest
 ```
 
 ## Create API Instance
@@ -29,7 +29,10 @@ gas_api = GasApi(config)
 Query the current gas balance and auto-refill configuration:
 
 ```python
-resp = gas_api.gas_status()
+param = GasStatusRequest()
+# param.networkMode = '...'  # optional: filter by network mode
+
+resp = gas_api.gas_status(param)
 
 # Gas balances per coin
 for bal in resp.get('gasBalance', []):
@@ -39,6 +42,12 @@ for bal in resp.get('gasBalance', []):
 for cfg in resp.get('configuration', []):
     print(f"Network: {cfg['network']} AutoRefill: {cfg['enabled']}")
 ```
+
+### GasStatusRequest Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `networkMode` | str | Optional. Filter by network mode. |
 
 ### GasStatusResponse Structure
 
@@ -65,10 +74,10 @@ Query gas refill records associated with a specific transaction:
 ```python
 param = GasTransactionsGetByTxKeyRequest()
 param.txKey = 'your-tx-key'
-resp = gas_api.gas_transactions_ge_b_tx_key(param)
+resp = gas_api.gas_transactions_get_by_tx_key(param)
 ```
 
-> **Note:** This endpoint works with `txKey` values from the V3 transaction API.
+> **Note:** This endpoint works with `txKey` values from the V3 transaction API. The deprecated `gas_transactions_ge_b_tx_key` method (typo) has been replaced by `gas_transactions_get_by_tx_key`.
 
 ### Response Fields
 
@@ -76,7 +85,7 @@ resp = gas_api.gas_transactions_ge_b_tx_key(param)
 |-------|------|-------------|
 | `txKey` | str | The queried transaction key |
 | `symbol` | str | Transaction fee coin |
-| `totalAmount` | str | Total fee amount across all records |
+| `totalAmount` | str | Total fee amount. A single transaction may have multiple Gas records; the total fee paid is the sum of all records with SUCCESS and FAILURE_GAS_CONSUMED statuses. |
 | `detailList` | list | Gas refill records associated with this transaction |
 
 **Detail Fields:**

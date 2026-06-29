@@ -30,7 +30,9 @@ const gasApi = new GasApi(config);
 Query the current gas balance and auto-refill configuration:
 
 ```typescript
-const resp = await gasApi.gasStatus();
+const resp = await gasApi.gasStatus({
+  networkMode: 'MAINNET',  // optional: filter by network mode
+});
 
 // Gas balances per coin
 for (const bal of resp.gasBalance) {
@@ -42,6 +44,12 @@ for (const cfg of resp.configuration) {
   console.log(`Network: ${cfg.network}, AutoRefill: ${cfg.enabled}`);
 }
 ```
+
+### GasStatusRequest Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `networkMode` | string | Optional. Filter by network mode. |
 
 ### GasStatusResponse Structure
 
@@ -82,7 +90,7 @@ for (const detail of resp.detailList) {
 |-------|------|-------------|
 | `txKey` | string | The queried transaction key |
 | `symbol` | string | Transaction fee coin |
-| `totalAmount` | string | Total fee amount across all records |
+| `totalAmount` | string | Total fee amount. A single transaction may have multiple Gas records; the total fee paid is the sum of all records with SUCCESS and FAILURE_GAS_CONSUMED statuses. |
 | `detailList` | Array | Gas refill records associated with this transaction |
 
 **Detail Fields:**
