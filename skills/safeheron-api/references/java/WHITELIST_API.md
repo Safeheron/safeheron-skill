@@ -9,6 +9,9 @@ import com.safeheron.client.request.*;
 import com.safeheron.client.response.*;
 import com.safeheron.client.utils.ServiceCreator;
 import com.safeheron.client.utils.ServiceExecutor;
+
+import java.util.ArrayList;
+import java.util.List;
 ```
 
 ## Create API Service
@@ -23,11 +26,12 @@ WhitelistApiService whitelistApi = ServiceCreator.create(WhitelistApiService.cla
 
 ```java
 CreateWhitelistRequest req = new CreateWhitelistRequest();
-req.setWhitelistName("Alice's ETH address");   // max 20 chars
+req.setWhitelistName("Alice's ETH address");   // unique, max 30 chars
 req.setChainType("EVM");                        // see chainType values below
 req.setAddress("0xAliceEthAddress...");
-// req.setMemo("optional memo");               // for TON networks (max 20 chars)
+// req.setMemo("12345");                       // TON / XRP Ledger only (max 20 chars; XRPL: numeric 0–4294967295)
 // req.setHiddenOnUI(false);                   // true = API-only, hidden in Console
+// req.setNote("Alice - Binance deposit");     // optional note
 
 CreateWhitelistResponse resp = ServiceExecutor.execute(whitelistApi.createWhitelist(req));
 String whitelistKey = resp.getWhitelistKey();   // save this — permanent identifier
@@ -37,11 +41,12 @@ String whitelistKey = resp.getWhitelistKey();   // save this — permanent ident
 
 | Field | Required | Type | Description |
 |-------|----------|------|-------------|
-| `whitelistName` | Yes | String | Display name (max 20 chars) |
+| `whitelistName` | Yes | String | Whitelist unique name, 30 characters max |
 | `chainType` | Yes | String | Blockchain type (see table below) |
-| `address` | Yes | String | Blockchain address to whitelist |
-| `memo` | No | String | Memo/tag for TON networks (max 20 chars) |
-| `hiddenOnUI` | No | Boolean | If true, hidden from Web Console / App |
+| `address` | Yes | String | Blockchain address to whitelist; the format must meet the chain's requirements |
+| `memo` | No | String | Memo / tag (up to 20 characters; for XRPL, the memo must be a numeric string in the range 0–4294967295). Only valid for chainType `TON` and `XRP Ledger` |
+| `hiddenOnUI` | No | Boolean | If true, hidden from Web Console / App (manageable via API only) |
+| `note` | No | String | Note |
 
 ### Supported chainType Values
 
@@ -59,6 +64,10 @@ String whitelistKey = resp.getWhitelistKey();   // save this — permanent ident
 | `Solana` | Solana |
 | `Bitcoin Testnet` | Bitcoin testnet |
 | `TON` | TON mainnet |
+| `Litecoin` | Litecoin mainnet |
+| `Dogecoin` | Dogecoin mainnet |
+| `Liquid` | Liquid mainnet |
+| `XRP Ledger` | XRP Ledger mainnet (native XRP only, no other tokens yet) |
 
 ---
 
@@ -66,7 +75,7 @@ String whitelistKey = resp.getWhitelistKey();   // save this — permanent ident
 
 ```java
 OneWhitelistRequest req = new OneWhitelistRequest();
-req.setWhitelistKey(whitelistKey);
+req.setWhitelistKey(whitelistKey);   // or req.setAddress("0x...") — whitelistKey takes precedence if both are set
 
 WhitelistResponse resp = ServiceExecutor.execute(whitelistApi.oneWhitelist(req));
 System.out.println("Name: " + resp.getWhitelistName());
@@ -80,12 +89,48 @@ System.out.println("Status: " + resp.getWhitelistStatus());
 
 ```java
 ListWhitelistRequest req = new ListWhitelistRequest();
-req.setLimit(20L);
+// Published docs mark chainType as required, but the service treats it as an optional filter —
+// passing it returns only that chain; omit it to list all chains.
+// req.setChainType("EVM");
+// req.setWhitelistStatus("APPROVED"); // optional filter: AUDIT / APPROVED / REJECTED
+// createTimeMin defaults to createTimeMax − 24 hours and createTimeMax defaults to now —
+// without createTimeMin you only get whitelists created in the last 24 hours
+req.setCreateTimeMin(1L);
+req.setLimit(500L);                   // max 500 per page
 
 List<WhitelistResponse> list = ServiceExecutor.execute(whitelistApi.listWhitelist(req));
 for (WhitelistResponse entry : list) {
     System.out.println(entry.getWhitelistKey() + " " + entry.getWhitelistName()
                        + " " + entry.getWhitelistStatus());
+}
+```
+
+> **Time window & paging:** `createTimeMin` defaults to `createTimeMax` minus 24 hours (`createTimeMax` defaults to now), so a request without time bounds returns only the last 24 hours. Results are cursor-paged: `direct` (`NEXT` by default) + `fromId` = `whitelistKey` of the last record of the previous page; `limit` max 500.
+
+### List ALL Whitelist Entries (all chains, all time)
+
+```java
+public List<WhitelistResponse> listAllWhitelists(WhitelistApiService whitelistApi) {
+    final long pageSize = 500L;
+    List<WhitelistResponse> all = new ArrayList<>();
+    String fromId = null;
+    while (true) {
+        ListWhitelistRequest req = new ListWhitelistRequest();
+        req.setCreateTimeMin(1L);          // override the 24h default window
+        req.setDirect("NEXT");
+        req.setLimit(pageSize);
+        req.setFromId(fromId);             // null for the first page
+        List<WhitelistResponse> page = ServiceExecutor.execute(whitelistApi.listWhitelist(req));
+        if (page == null || page.isEmpty()) {
+            break;
+        }
+        all.addAll(page);
+        if (page.size() < pageSize) {
+            break;
+        }
+        fromId = page.get(page.size() - 1).getWhitelistKey();
+    }
+    return all;
 }
 ```
 
@@ -96,8 +141,10 @@ for (WhitelistResponse entry : list) {
 ```java
 EditWhitelistRequest req = new EditWhitelistRequest();
 req.setWhitelistKey(whitelistKey);
-req.setWhitelistName("Updated name");
-req.setAddress("0xNewAddress");
+req.setWhitelistName("Updated name");   // required
+req.setAddress("0xNewAddress");         // required
+// req.setNote("updated note");         // optional — like memo, note overwrites the stored value;
+//                                       // pass the current note to keep it
 
 ServiceExecutor.execute(whitelistApi.editWhitelist(req));
 ```
@@ -107,10 +154,11 @@ ServiceExecutor.execute(whitelistApi.editWhitelist(req));
 | Field | Required | Type    | Description |
 |-------|----------|---------|-------------|
 | `whitelistKey` | Yes | String  | Unique identifier of the whitelist entry to edit |
-| `whitelistName` | Yes | String  | New display name (max 20 chars) |
+| `whitelistName` | Yes | String  | Whitelist unique name, 30 characters max |
 | `address` | Yes | String  | Public blockchain address and the address format needs to meet the requirements of the chain |
-| `memo` | No | String  | The memo (up to 20 characters) for the public blockchain address, also known as a comment or tag. This parameter is only valid for the following public blockchain types (chainType):TON: TON mainnet |
+| `memo` | No | String  | The memo (up to 20 characters; for XRPL, the memo must be a numeric string in the range 0–4294967295) for the public blockchain address, also known as a comment or tag. Only valid for chainType `TON` (TON mainnet) and `XRP Ledger` (XRP Ledger mainnet) |
 | `force` | No | Boolean | When the whitelist is involved in a transaction approval policy, modifications will result in the new whitelist being directly applied to the approval policy. False by default, meaning that when involved in a transaction approval policy, it will not be modified |
+| `note` | No | String  | Note |
 ---
 
 ## Delete a Whitelist Entry
@@ -130,8 +178,12 @@ Automatically creates a whitelist entry using the destination address of a compl
 
 ```java
 CreateFromTransactionWhitelistRequest req = new CreateFromTransactionWhitelistRequest();
-req.setTxKey(txKey);
-req.setWhitelistName("Recipient from TX-001");
+req.setTxKey(txKey);                                  // required
+req.setWhitelistName("Recipient from TX-001");        // required, unique, max 30 chars
+req.setDestinationAddress(destinationAddress);        // required — the destination address in the transaction record (case-sensitive)
+// req.setMemo("12345");      // TON / XRP Ledger: if the transaction used a memo, the same memo must be provided
+// req.setHiddenOnUI(false);
+// req.setNote("optional note");
 
 CreateWhitelistResponse resp = ServiceExecutor.execute(
         whitelistApi.createFromTransactionWhitelist(req));
@@ -148,10 +200,13 @@ String whitelistKey = resp.getWhitelistKey();
 | `whitelistName` | String | Display name |
 | `chainType` | String | Blockchain type |
 | `address` | String | Whitelisted address |
-| `memo` | String | Memo (TON networks) |
+| `memo` | String | Memo of the address when creating the whitelist (TON / XRP Ledger) |
 | `whitelistStatus` | String | `AUDIT` / `APPROVED` / `REJECTED` |
+| `note` | String | Note |
 | `createTime` | Long | Unix timestamp (ms) |
 | `lastUpdateTime` | Long | Unix timestamp (ms) |
+
+> The API also returns `hiddenOnUI`, but `WhitelistResponse` in SDK 1.0.15 does not have this field.
 
 ### Whitelist Status Values
 

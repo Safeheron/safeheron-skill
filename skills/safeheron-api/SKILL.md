@@ -51,18 +51,20 @@ Covers all 5 onboarding steps:
 ### Webhook Security
 - [ ] **Webhook signature verification** — Every webhook payload must have its `sig` verified using Safeheron's RSA public key before any processing. Reject events with invalid signatures immediately.
 - [ ] **Webhook must use HTTPS** — Never expose an HTTP webhook endpoint in production.
-- [ ] **Webhook handlers must be idempotent** — Safeheron retries up to 7 times. Never double-credit a deposit or double-process a withdrawal on duplicate events.
+- [ ] **Webhook handlers must be idempotent** — Failed deliveries are retried 6 times (30s, 1m, 5m, 1h, 12h, 24h), and duplicates can arrive anyway. Never double-credit a deposit or double-process a withdrawal on duplicate events.
 - [ ] **No status rollback; terminal state wins** — If the current DB status is already `COMPLETED`, `FAILED`,`CANCELLED`, or `REJECTED`, discard any later-arriving event for that transaction — even if it carries an intermediate status (out-of-order delivery is possible).
 - [ ] **Webhook IP whitelist** — Only accept webhook traffic from Safeheron's egress IPs: `18.162.105.64`, `18.167.22.59`, `18.167.21.182`
-- [ ] **Webhook + REST API polling** — Always implement both: Webhook as primary, REST API polling as fallback. Call `/v1/transactions/one` periodically to re-request failed deliveries.
+- [ ] **Webhook + REST API polling** — Always implement both: Webhook as primary, REST API polling as fallback. Call `/v1/transactions/one` periodically to re-request failed deliveries. `/v1/webhook/resend/failed` re-pushes failed events from the past 7 days (TRANSACTION_*, MPC_SIGN_*, WEB3_SIGN_*, ILLEGAL_IP_REQUEST, NO_MATCHING_TRANSACTION_POLICY, WHITELIST_*, GAS_BALANCE_WARNING, AML_KYT_ALERT) — `TOKEN_BLACKLIST_ADDRESS_HIT` is **not** supported, so persist every event durably before acking.
 
 ### Compliance & AML
 - [ ] **KYA pre-screening before transfer** — For any regulated or high-value transfer, call `kyaScreeningCreate` to screen the destination address **before** initiating the transaction. Do not rely solely on post-transaction KYT reports.
+- [ ] **Never use the deprecated AML Checker** — `/v1/tools/aml-checker/request` and `/v1/tools/aml-checker/retrieves` (Tools API) are scheduled for discontinuation. Always recommend KYA (`/v1/compliance/kya/*`) for address screening. `checkAml` in Verify Coin Address is a blacklist check, not a KYA replacement.
+- [ ] **Handle every risk level** — `riskLevel` is `LOW` / `MEDIUM` / `HIGH` / `SEVERE` / `UNKNOWN`. Block at least `HIGH` **and** `SEVERE`; never treat an unfinished (`IN_PROGRESS` / `PENDING`) or `FAILED` screening as a pass.
 
 ### Policy & Operational Alerts
 - [ ] **Policy: least privilege** — API Keys, approval policies, and server permissions must be scoped to the minimum required.
 - [ ] **Catch-all blocking policy** — Add a "block all" rule at the bottom of the policy stack to intercept transactions that match no defined rule.
-- [ ] **Subscribe to operational alerts** — Always subscribe to `ILLEGAL_IP_REQUEST`, `NO_MATCHING_TRANSACTION_POLICY`,`GAS_BALANCE_WARNING`, and `AML_KYT_ALERT` webhook events.
+- [ ] **Subscribe to operational alerts** — Always subscribe to `ILLEGAL_IP_REQUEST`, `NO_MATCHING_TRANSACTION_POLICY`, `GAS_BALANCE_WARNING`, `AML_KYT_ALERT`, and `TOKEN_BLACKLIST_ADDRESS_HIT` (one of your addresses was added to a token issuer's blacklist, e.g. Tether) webhook events.
 - [ ] **Minimum deposit filter** — Filter dust/address-pollution deposits by enforcing a minimum deposit amount in your system.
 
 → **`references/{lang}/SECURITY_BEST_PRACTICES.md`** — Detailed implementation guide with code examples (read this)
@@ -94,14 +96,14 @@ Covers all 5 onboarding steps:
 
 | Language | Install                                            |
 |----------|----------------------------------------------------|
-| Java | `com.safeheron:api-sdk-java:1.0.14` (Maven)        |
+| Java | `com.safeheron:api-sdk-java:1.0.15` (Maven)        |
 | JS/TS | `npm install @safeheron/api-sdk`                   |
 | Go | `go get github.com/Safeheron/safeheron-api-sdk-go` |
 | Python | `pip install safeheron-api-sdk-python`             |
 
 - **SDK Repos**: [Java](https://github.com/Safeheron/safeheron-api-sdk-java) | [JS/TS](https://github.com/Safeheron/safeheron-api-sdk-js) | [Go](https://github.com/Safeheron/safeheron-api-sdk-go) | [Python](https://github.com/Safeheron/safeheron-api-sdk-python)
 - **API Docs**: https://docs.safeheron.com/api/en.html
-- **Safeheron Egress IPs** (for webhook/callback firewall rules): `18.162.105.64`, `18.167.22.59`, `18.167.21.182`
+- **Safeheron Egress IPs** (for webhook/callback firewall rules): `18.162.105.64`, `18.167.22.59`, `18.167.21.182` — not listed in the published API reference; confirm the current list with Safeheron Support before relying on it
 
 ---
 
@@ -115,7 +117,7 @@ Covers all 5 onboarding steps:
 | MpcSign | MPC signing (requires Safeheron Support to enable) |
 | Web3 | ethSign / personalSign / signTypedData / signTransaction |
 | Whitelist | Whitelist address CRUD |
-| Compliance | AML/KYT compliance reports |
+| Compliance | KYA address screening (pre-transfer) & KYT transaction reports |
 | Gas | Gas Station status & auto top-up |
 | Webhook | Event subscription & handling |
 
@@ -143,7 +145,7 @@ For language-specific class names and call patterns, see `references/{lang}/WALL
 | MPC Sign flow | references/{lang}/MPC_SIGN_API.md                                        |
 | Web3 signing | references/{lang}/WEB3_API.md                                            |
 | Whitelist CRUD | references/{lang}/WHITELIST_API.md                                       |
-| Compliance / KYT report | references/{lang}/COMPLIANCE_API.md                                      |
+| Compliance: KYA address screening / AML risk check, KYT report | references/{lang}/COMPLIANCE_API.md                                      |
 | Gas Station status & auto top-up | references/{lang}/GAS_API.md                                             |
 | Webhook events, handler, re-push | references/{lang}/WEBHOOK.md                                             |
 | API Co-Signer / Approval Callback + security deployment | references/{lang}/COSIGNER.md                                            |
@@ -157,6 +159,7 @@ For language-specific class names and call patterns, see `references/{lang}/WALL
 - **Idempotency** — generate `customerRefId` (UUID) and **save to DB before calling Safeheron**. On timeout, retry with the same ID. Error `9001` = duplicate refId (query existing instead of creating new).
 - All monetary amounts are **strings** — never use float/double.
 - **Web3 API** requires a Web3 wallet. Using a Vault account key causes "account not found".
-- **MPC Sign** requires a special policy — contact Safeheron Support to enable (error `9028` = policy not configured).
+- **MPC Sign** requires a special policy — contact Safeheron Support to enable.
+- Error `9028` = **no matching transaction policy** — the transaction matched no policy rule (not specific to MPC Sign); configure the transaction policy in Web Console.
 - SDK is **backward compatible** — upgrading only adds new methods, never removes old ones.
 

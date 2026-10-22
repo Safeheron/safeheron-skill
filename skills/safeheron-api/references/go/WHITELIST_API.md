@@ -21,11 +21,12 @@ whitelistApi := api.WhitelistApi{Client: sc}
 
 ```go
 req := api.CreateWhitelistRequest{
-    WhitelistName: "Alice's ETH address", // max 20 chars
+    WhitelistName: "Alice's ETH address", // max 30 chars, unique
     ChainType:     "EVM",                 // see chainType values below
     Address:       "0xAliceEthAddress...",
-    // Memo:       "optional memo",       // for TON networks (max 20 chars)
+    // Memo:       "optional memo",       // TON / XRP Ledger only (max 20 chars; XRPL: numeric string 0–4294967295)
     // HiddenOnUI: false,                 // true = API-only, hidden in Console
+    // Note:       "optional note",
 }
 
 var resp api.CreateWhitelistResponse
@@ -39,11 +40,12 @@ whitelistKey := resp.WhitelistKey // save this -- permanent identifier
 
 | Field | Required | Type | Description |
 |-------|----------|------|-------------|
-| `WhitelistName` | Yes | `string` | Display name (max 20 chars) |
+| `WhitelistName` | Yes | `string` | Whitelist unique name, 30 characters max |
 | `ChainType` | Yes | `string` | Blockchain type (see table below) |
 | `Address` | Yes | `string` | Blockchain address to whitelist |
-| `Memo` | No | `string` | Memo/tag for TON networks (max 20 chars) |
-| `HiddenOnUI` | No | `bool` | If true, hidden from Web Console / App |
+| `Memo` | No | `string` | The memo (up to 20 characters; for XRPL, the memo must be a numeric string in the range 0–4294967295), also known as a comment or tag. Only valid for chainType `TON` (TON mainnet) and `XRP Ledger` (XRP Ledger mainnet) |
+| `HiddenOnUI` | No | `bool` | If true, hidden from Web Console / App (manageable via API only) |
+| `Note` | No | `string` | Note (180 chars max per service-side validation; not stated in the published docs) |
 
 ### Supported chainType Values
 
@@ -61,14 +63,21 @@ whitelistKey := resp.WhitelistKey // save this -- permanent identifier
 | `Solana` | Solana |
 | `Bitcoin Testnet` | Bitcoin testnet |
 | `TON` | TON mainnet |
+| `Litecoin` | Litecoin mainnet |
+| `Dogecoin` | Dogecoin mainnet |
+| `Liquid` | Liquid mainnet |
+| `XRP Ledger` | XRP Ledger mainnet (native XRP only, no other tokens yet) |
 
 ---
 
 ## Retrieve a Single Whitelist Entry
 
+Look up by `WhitelistKey` **or** by `Address` (one of them is required; if both are given, `WhitelistKey` takes precedence):
+
 ```go
 req := api.OneWhitelistRequest{
     WhitelistKey: whitelistKey,
+    // Address:   "0xAliceEthAddress...", // alternative lookup key
 }
 
 var resp api.WhitelistResponse
@@ -83,19 +92,40 @@ fmt.Printf("Name: %s, Address: %s, Status: %s\n",
 
 ## List Whitelist Entries
 
-```go
-req := api.ListWhitelistRequest{
-    Limit: 20,
-}
+> **Time window and paging (published docs):** `CreateTimeMin` defaults to `CreateTimeMax` minus **24 hours** and `CreateTimeMax` defaults to now — a request without time bounds only returns whitelists created in the last 24 hours. `Limit` is at most 500. Paging is cursor-based: `Direct` (`NEXT` by default) + `FromId` = `whitelistKey` of the last record of the previous page.
+>
+> All `ListWhitelistRequest` fields are `omitempty` in Go SDK v1.0.15, so `CreateTimeMin: 0` is **not sent** (the 24h default applies) — use `1` for "from the beginning".
 
-var list []api.WhitelistResponse
-if err := whitelistApi.ListWhitelist(req, &list); err != nil {
-    panic(fmt.Errorf("failed to list whitelist: %w", err))
-}
-for _, entry := range list {
-    fmt.Printf("%s %s %s\n", entry.WhitelistKey, entry.WhitelistName, entry.WhitelistStatus)
+```go
+// List ALL whitelist entries (all chains, all creation times)
+func listAllWhitelists(whitelistApi api.WhitelistApi) ([]api.WhitelistResponse, error) {
+    const pageSize = 500
+    var all []api.WhitelistResponse
+    fromId := ""
+    for {
+        req := api.ListWhitelistRequest{
+            Direct:        "NEXT",
+            Limit:         pageSize,
+            FromId:        fromId,                 // "" on the first page (omitted)
+            CreateTimeMin: 1,                      // not 0: 0 is dropped by omitempty → 24h default
+            CreateTimeMax: time.Now().UnixMilli(),
+            // ChainType: "EVM", // Published docs mark chainType as required, but the service treats it as an optional
+            //                   // filter — passing it returns only that chain; omit it to list all chains.
+        }
+        var page []api.WhitelistResponse
+        if err := whitelistApi.ListWhitelist(req, &page); err != nil {
+            return nil, fmt.Errorf("failed to list whitelist: %w", err)
+        }
+        all = append(all, page...)
+        if len(page) < pageSize {
+            return all, nil
+        }
+        fromId = page[len(page)-1].WhitelistKey
+    }
 }
 ```
+
+Imports used: `fmt`, `time`.
 
 ---
 
@@ -104,7 +134,11 @@ for _, entry := range list {
 ```go
 req := api.EditWhitelistRequest{
     WhitelistKey:  whitelistKey,
-    WhitelistName: "Updated name",
+    WhitelistName: "Updated name",           // required
+    Address:       "0xAliceEthAddress...",   // required — pass the (new or unchanged) address
+    // Memo:       "...",                    // TON / XRP Ledger only
+    // Force:      true,                     // also apply to approval policies that reference this whitelist
+    // Note:       "updated note",       // note (like memo) overwrites the stored value — pass the current note to keep it
 }
 
 var resp api.ResultResponse
@@ -118,10 +152,12 @@ if err := whitelistApi.EditWhitelist(req, &resp); err != nil {
 | Field | Required | Type | Description |
 |-------|----------|------|-------------|
 | `WhitelistKey` | Yes | `string` | Unique identifier of the whitelist entry to edit |
-| `WhitelistName` | Yes | `string` | New display name (max 20 chars) |
-| `address` | Yes | `string` | Public blockchain address and the address format needs to meet the requirements of the chain |
-| `memo` | No | `string` | The memo (up to 20 characters) for the public blockchain address, also known as a comment or tag. This parameter is only valid for the following public blockchain types (chainType):TON: TON mainnet |
-| `force` | No | `bool` | When the whitelist is involved in a transaction approval policy, modifications will result in the new whitelist being directly applied to the approval policy. False by default, meaning that when involved in a transaction approval policy, it will not be modified |
+| `WhitelistName` | Yes | `string` | Whitelist unique name, 30 characters max |
+| `Address` | Yes | `string` | Public blockchain address and the address format needs to meet the requirements of the chain |
+| `Memo` | No | `string` | The memo (up to 20 characters; for XRPL, the memo must be a numeric string in the range 0–4294967295) for the public blockchain address, also known as a comment or tag. Only valid for chainType `TON` (TON mainnet) and `XRP Ledger` (XRP Ledger mainnet) |
+| `Force` | No | `bool` | When the whitelist is involved in a transaction approval policy, modifications will result in the new whitelist being directly applied to the approval policy. False by default, meaning that when involved in a transaction approval policy, it will not be modified |
+| `Note` | No | `string` | Note |
+
 ---
 
 ## Delete a Whitelist Entry
@@ -143,8 +179,12 @@ if err := whitelistApi.DeleteWhitelist(req, &resp); err != nil {
 
 ```go
 req := api.CreateFromTransactionWhitelistRequest{
-    TxKey:         txKey,
-    WhitelistName: "Recipient from TX-001",
+    TxKey:              txKey,
+    WhitelistName:      "Recipient from TX-001", // required, max 30 chars
+    DestinationAddress: "0xRecipient...",        // required — the destination address in the tx record (case-sensitive)
+    // Memo:            "...",                   // TON / XRP Ledger: must match the memo used in the transaction
+    // HiddenOnUI:      false,
+    // Note:            "optional note",
 }
 
 var resp api.CreateWhitelistResponse
@@ -153,6 +193,17 @@ if err := whitelistApi.CreateFromTransactionWhitelist(req, &resp); err != nil {
 }
 whitelistKey := resp.WhitelistKey
 ```
+
+### CreateFromTransactionWhitelistRequest Fields
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `WhitelistName` | Yes | `string` | Whitelist unique name, 30 characters max |
+| `TxKey` | Yes | `string` | Transaction key |
+| `DestinationAddress` | Yes | `string` | The destination address in the transaction record; case-sensitive |
+| `Memo` | No | `string` | The memo (up to 20 characters; for XRPL, the memo must be a numeric string in the range 0–4294967295) for the destination address. For TON and XRP Ledger, if a destination address memo was set initially, a memo matching the one in the transaction record must be provided |
+| `HiddenOnUI` | No | `bool` | If true, hidden from Web Console / App |
+| `Note` | No | `string` | Note |
 
 ---
 
@@ -164,10 +215,13 @@ whitelistKey := resp.WhitelistKey
 | `WhitelistName` | `string` | Display name |
 | `ChainType` | `string` | Blockchain type |
 | `Address` | `string` | Whitelisted address |
-| `Memo` | `string` | Memo (TON networks) |
+| `Memo` | `string` | Memo of the address when creating a whitelist |
 | `WhitelistStatus` | `string` | `AUDIT` / `APPROVED` / `REJECTED` |
+| `Note` | `string` | Note |
 | `CreateTime` | `int64` | Unix timestamp (ms) |
 | `LastUpdateTime` | `int64` | Unix timestamp (ms) |
+
+> The API also returns `hiddenOnUI`, and List accepts a `hiddenOnUI` filter, but Go SDK v1.0.15 `WhitelistResponse` / `ListWhitelistRequest` do not declare them yet.
 
 ### Whitelist Status Values
 

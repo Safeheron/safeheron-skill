@@ -103,7 +103,7 @@ Add to `pom.xml`:
 <dependency>
     <groupId>com.safeheron</groupId>
     <artifactId>api-sdk-java</artifactId>
-    <version>1.0.14</version>
+    <version>1.0.15</version>
 </dependency>
 ```
 
@@ -123,7 +123,7 @@ Add to `build.gradle`:
 
 ```groovy
 dependencies {
-    implementation 'com.safeheron:api-sdk-java:1.0.14'
+    implementation 'com.safeheron:api-sdk-java:1.0.15'
 }
 ```
 
@@ -131,7 +131,7 @@ Or for `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.safeheron:api-sdk-java:1.0.14")
+    implementation("com.safeheron:api-sdk-java:1.0.15")
 }
 ```
 

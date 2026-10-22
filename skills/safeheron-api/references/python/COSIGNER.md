@@ -4,18 +4,18 @@
 
 The API Co-Signer is a service you deploy that **automatically approves or rejects transactions** based on your business logic. It replaces manual approval workflows for programmatic use cases and is required for unattended operation in production environments.
 
-When a transaction requires approval, Safeheron calls your **Approval Callback Service** (an HTTP endpoint you implement) with an encrypted callback payload. Your service evaluates the transaction and responds `APPROVE` or `REJECT`.
+When a transaction requires approval, Safeheron calls your **Approval Callback Service** (an HTTP endpoint you implement) with an encrypted callback payload. Your service evaluates the transaction and responds `APPROVE` or `REJECT` (or any other value to keep it pending, e.g. while KYT screening is still running).
 
 ---
 
 ## How It Works
 
 ```
-1. Client creates transaction / MPC sign / Web3 sign
+1. A transaction / MPC sign / Web3 sign is created (via API, Safeheron App or Web Console)
 2. Safeheron: transaction enters SUBMITTED status
 3. API Co-Signer polls Safeheron (every 5s in v2.x, every 1s in v1.x)
 4. API Co-Signer calls your Approval Callback Service (HTTP POST)
-5. Your service returns APPROVE or REJECT
+5. Your service returns APPROVE or REJECT (any other value → Co-Signer retries every 5s)
 6. Transaction proceeds to SIGNING or is REJECTED
 ```
 
@@ -46,100 +46,235 @@ converter = CoSignerConverter(cosigner_config)
 
 ### Flask Approval Callback Service (V3 -- Recommended)
 
+> Placeholders you must implement: `find_order_by_ref_id` (returns your pending order or `None`; the order is a dict with `coin_key` and `outputs` — the expected destinations as `[{'address', 'amount', 'memo'}]`, `amount` a decimal string), `matches_fuel_policy`, `matches_sweep_policy`, `matches_gas_deposit_policy`, `matches_mpc_sign_request`, `matches_web3_sign_request`. Callback `destinationAddressList` items carry `address` / `amount` / `memo`.
+
 ```python
 from flask import Flask, request, jsonify
-import json
-from decimal import Decimal
+from decimal import Context, Decimal, InvalidOperation
 
 app = Flask(__name__)
 
+
 @app.route('/cosigner/callback', methods=['POST'])
 def handle_cosigner_callback():
+    approval_id = ''
     try:
-        raw_body = request.get_json(force=True)
+        # Decrypt and verify signature (V3 protocol) -- returns the decrypted bizContent as a dict
+        biz_content = converter.request_v3_convert(request.get_json(force=True))
+        approval_id = biz_content.get('approvalId', '')
+        action = decide(approval_id, biz_content.get('type', ''), biz_content.get('detail') or {})
+    except Exception:
+        app.logger.exception("Callback processing error -- rejecting")
+        action = 'REJECT'
 
-        # Decrypt and verify signature (V3 protocol)
-        biz_content = converter.request_v3_convert(raw_body)
-
-        callback_type = biz_content.get('type', '')
-        detail = biz_content.get('detail', {})
-
-        # Determine approval based on business logic
-        action = evaluate_approval(callback_type, detail)
-
-        # Build encrypted response
-        response = CoSignerResponseV3()
-        response.action = action  # "APPROVE" or "REJECT"
-        response.approvalId = biz_content.get('approvalId', '')
-
-        encrypted_response = converter.response_v3_converter(response)
-        return jsonify(encrypted_response)
-
-    except Exception as e:
-        app.logger.error(f"Callback processing error: {e}")
-        # On error, reject by default for safety
-        response = CoSignerResponseV3()
-        response.action = "REJECT"
-        response.approvalId = ""
-        encrypted_response = converter.response_v3_converter(response)
-        return jsonify(encrypted_response)
+    response = CoSignerResponseV3()
+    response.action = action  # "APPROVE", "REJECT", or ACTION_WAIT (keeps the approval pending)
+    response.approvalId = approval_id
+    return jsonify(converter.response_v3_converter(response))
 
 
-def evaluate_approval(callback_type, content):
-    """Implement your business validation logic here."""
-
-    if callback_type in ('TRANSACTION', 'TX_TRANSACTION', 'CONNECT_TX_SEND', 'TX_CONNECT_TX_SEND', 'TRANSACTION_BATCH_UTXO'):
-        return evaluate_transaction_approval(content)
-    elif callback_type == 'MPC_SIGN':
-        return evaluate_mpc_sign_approval(content)
-    elif callback_type in ('ETH_SIGN', 'PERSONAL_SIGN', 'ETH_SIGN_TYPED_DATA', 'ETH_SIGNTRANSACTION'):
-        return evaluate_web3_sign_approval(content)
-
-    # Unknown type -- reject
-    return "REJECT"
+# Current Co-Signer sends TRANSACTION / MPC_SIGN / WEB3_SIGN / CALLBACK_TEST;
+# the other values are legacy type names also recognised by the Safeheron SDK
+TX_TYPES = ('TRANSACTION', 'TX_TRANSACTION', 'CONNECT_TX_SEND', 'TX_CONNECT_TX_SEND', 'TRANSACTION_BATCH_UTXO')
+WEB3_TYPES = ('WEB3_SIGN', 'ETH_SIGN', 'PERSONAL_SIGN', 'ETH_SIGN_TYPED_DATA', 'ETH_SIGNTRANSACTION')
 
 
-def evaluate_transaction_approval(tx):
-    customer_ref_id = tx.get('customerRefId', '')
+# Default REJECT -- return APPROVE only when every check passes
+def decide(approval_id, callback_type, detail):
+    if callback_type == 'CALLBACK_TEST':
+        # Connectivity test sent by `cosigner callback-test` -- detail is empty, no real transaction involved
+        return 'APPROVE'
+    if callback_type == 'MPC_SIGN':
+        # Verify txKey/customerRefId, sourceAccountKey and dataList against your pending MPC sign request
+        return 'APPROVE' if matches_mpc_sign_request(detail) else 'REJECT'
+    if callback_type in WEB3_TYPES:
+        # Branch on detail['subjectType'] and verify message / messageHash / transaction against your pending request
+        return 'APPROVE' if matches_web3_sign_request(detail) else 'REJECT'
+    if callback_type not in TX_TYPES:
+        app.logger.warning(f"REJECT: unknown callback type {callback_type}")
+        return 'REJECT'
 
-    # 1. Verify customerRefId exists in your DB
-    order = find_order_by_ref_id(customer_ref_id)
+    # 1. Business rules by transactionType
+    if not passes_business_rules(detail):
+        app.logger.warning(f"REJECT: business rules failed, txKey={detail.get('txKey')}, "
+                           f"transactionType={detail.get('transactionType')}")
+        return 'REJECT'
+
+    # 2. AML / KYT check (see "AML / KYT Handling in the Callback" below)
+    aml_decision = evaluate_aml(approval_id, detail)
+    if aml_decision == AML_WAIT:
+        # Neither APPROVE nor REJECT -> Co-Signer re-sends this approval every 5s with the latest KYT report
+        return ACTION_WAIT
+    return 'APPROVE' if aml_decision == AML_PASS else 'REJECT'
+
+
+# Per Safeheron "TRANSACTION Type Approval" best practices; any other subtype is rejected
+def passes_business_rules(tx):
+    transaction_type = tx.get('transactionType') or ''
+    destination_account_type = tx.get('destinationAccountType')
+    if transaction_type in ('NORMAL',                # API-created, or manually initiated in App / Web Console --
+                                                     # a manual one has no business order and is rejected here
+                            'UTXO_BATCH_TRANSFER'):
+        return matches_business_order(tx)
+    if transaction_type == 'UTXO_COLLECTION':        # API or manual sweep -- destination must be your own vault account
+        return destination_account_type == 'VAULT_ACCOUNT'
+    if transaction_type == 'AUTO_FUEL':              # system-initiated by Auto Sweep, no business order
+        return destination_account_type == 'VAULT_ACCOUNT' and matches_fuel_policy(tx)
+    if transaction_type == 'AUTO_SWEEP':             # system-initiated, no business order: destination + USD amount per your policy
+        return matches_sweep_policy(tx)
+    if transaction_type == 'GAS_SERVICE_DEPOSIT':    # confirm the deposit exists in your records; destination must be PROFILE_ACCOUNT
+        return destination_account_type == 'PROFILE_ACCOUNT' and matches_gas_deposit_policy(tx)
+    return False
+
+
+def matches_business_order(tx):
+    order = find_order_by_ref_id(tx.get('customerRefId', ''))
     if order is None:
-        app.logger.warning(f"REJECT: unknown customerRefId {customer_ref_id}")
-        return "REJECT"
+        return False
+    # Currency must match -- same address + amount in a different coin is a different transaction
+    if not tx.get('coinKey') or tx.get('coinKey') != order.get('coin_key'):
+        return False
+    # Compare every (address, amount, memo) -- exactly one for NORMAL, several for UTXO_BATCH_TRANSFER.
+    # The memo decides who is credited on TON / XRP Ledger.
+    # Build all keys first: any missing address/amount or invalid amount means "no match" (never sort a list with None)
+    actual = [output_key(d.get('address'), d.get('amount'), d.get('memo')) for d in destinations_of(tx)]
+    expected = [output_key(o.get('address'), o.get('amount'), o.get('memo')) for o in order.get('outputs') or []]
+    if not actual or None in actual or None in expected:
+        return False
+    return sorted(actual) == sorted(expected)
 
-    # 2. Verify amount matches
-    if Decimal(tx.get('txAmount', '0')) != order['expected_amount']:
-        app.logger.warning(f"REJECT: amount mismatch for {customer_ref_id}")
-        return "REJECT"
 
-    # 3. Verify destination address matches
-    if tx.get('destinationAddress', '').lower() != order['destination_address'].lower():
-        app.logger.warning(f"REJECT: destination mismatch for {customer_ref_id}")
-        return "REJECT"
+# UTXO coins carry destinations in destinationAddressList; account-model coins use destinationAddress + txAmount
+def destinations_of(tx):
+    if tx.get('destinationAddressList'):
+        return tx['destinationAddressList']
+    if not tx.get('destinationAddress'):
+        return []
+    return [{'address': tx['destinationAddress'], 'amount': tx.get('txAmount'), 'memo': tx.get('memo')}]
 
-    # 4. Check AML risk
-    for aml in tx.get('amlList', []):
-        if aml.get('riskLevel', '').upper() in ('HIGH', 'SEVERE'):
-            return "REJECT"
 
-    return "APPROVE"
+# Wide enough that normalize() never rounds a real on-chain amount (the default context keeps only 28 digits)
+_AMOUNT_CONTEXT = Context(prec=100)
+
+
+def output_key(address, amount, memo):
+    if not isinstance(address, str) or not address or not isinstance(amount, str) or not amount:
+        return None
+    try:
+        value = Decimal(amount)
+    except InvalidOperation:
+        return None
+    if not value.is_finite():
+        return None
+    # Lower-casing suits EVM (hex) addresses only -- compare case-sensitively for base58 / XRP Ledger / TRON / Solana
+    return f"{address.lower()}|{value.normalize(_AMOUNT_CONTEXT)}|{memo or ''}"
+```
+
+---
+
+## AML / KYT Handling in the Callback
+
+**Prerequisites:**
+- `amlScreeningTriggeredState` — included from API Co-Signer **2.1.1**.
+- `amlList` — additionally requires `CALLBACK_INCLUDE_KYT_REPORT=true` (restart required). Without it `amlList` is absent — an empty list does **not** mean "no risk".
+
+Follow Safeheron's KYT status handling guide — **never treat "not finished" or "unknown" as "safe"**:
+
+| Condition | Decision |
+|-----------|----------|
+| `amlScreeningTriggeredState` missing | Co-Signer < 2.1.1 — reject if your policy requires KYT (`KYT_REQUIRED`), otherwise pass |
+| `UNTRIGGERED` | No screening for this transaction — AML check passes |
+| `IN_PROGRESS`, or any `amlList[].status = PENDING` | **Wait**: return neither APPROVE nor REJECT; Co-Signer retries every 5s. Measure the wait from the **first callback you received** for this `approvalId` (not `createTime`); after ~5 min (business-dependent) fall back to REJECT / manual review |
+| `TRIGGERED` but `amlList` empty | `CALLBACK_INCLUDE_KYT_REPORT` is off — reject and alert |
+| any `status = FAILED`, or a missing / unknown status or state | Manual handling — reject and alert |
+| `status = SKIPPED` | Manually skipped in Web Console — passes |
+| `status = COMPLETED` | Act on `riskLevel`: `LOW` / `MEDIUM` / `HIGH` / `SEVERE` / `UNKNOWN` (report obtained, no level; a missing level is treated the same). With multiple providers, screening is complete only when **all** are COMPLETED |
+
+> `riskLevel` handling is your own compliance policy. The example only lets `LOW` and `MEDIUM` pass (so `HIGH`, `SEVERE`, `UNKNOWN` and any unexpected value are rejected); adjust `ALLOWED_RISK_LEVELS` per your jurisdiction.
+
+```python
+import threading
+import time
+
+AML_PASS, AML_WAIT, AML_REJECT = 'PASS', 'WAIT', 'REJECT'
+
+# Any value other than APPROVE / REJECT keeps the approval pending. Source: Safeheron API docs -> Compliance ->
+# "Compliance Best Practices" (KYT Status Handling Guide): "Approval Callback Service returns a non-APPROVE /
+# non-REJECT value ... API Co-Signer retries approval every 5 seconds with the latest KYT report".
+# The literal 'WAIT' is our choice of such a value.
+ACTION_WAIT = 'WAIT'
+AML_WAIT_TIMEOUT_SECONDS = 5 * 60
+# Whitelist: only these risk levels may pass; HIGH, SEVERE, UNKNOWN and any unexpected value are rejected
+ALLOWED_RISK_LEVELS = {'LOW', 'MEDIUM'}
+# True: reject when the callback carries no KYT data (Co-Signer < 2.1.1). Set False only if you do not use KYT
+KYT_REQUIRED = True
+
+# When this service first saw each pending approval. Multi-instance or multi-worker (e.g. gunicorn) deployments:
+# this dict is per process -- use Redis SET NX with a TTL instead
+_aml_wait_started_at = {}
+_aml_wait_lock = threading.Lock()
+
+
+def evaluate_aml(approval_id, tx):
+    decision = evaluate_aml_state(tx)
+    with _aml_wait_lock:
+        if decision != AML_WAIT:
+            _aml_wait_started_at.pop(approval_id, None)
+            return decision
+        started_at = _aml_wait_started_at.setdefault(approval_id, time.monotonic())
+        if time.monotonic() - started_at > AML_WAIT_TIMEOUT_SECONDS:
+            _aml_wait_started_at.pop(approval_id, None)
+            app.logger.error(f"KYT screening not finished after timeout, txKey={tx.get('txKey')}")
+            return AML_REJECT  # or route to manual review
+    return AML_WAIT
+
+
+# Whitelist style: anything not explicitly recognised as safe is rejected
+def evaluate_aml_state(tx):
+    state = tx.get('amlScreeningTriggeredState')
+    if not state:
+        app.logger.warning(f"No KYT data in approval callback (Co-Signer < 2.1.1?), txKey={tx.get('txKey')}")
+        return AML_REJECT if KYT_REQUIRED else AML_PASS
+    if state == 'UNTRIGGERED':
+        return AML_PASS
+    if state == 'IN_PROGRESS':
+        return AML_WAIT
+    if state != 'TRIGGERED':
+        app.logger.error(f"Unknown amlScreeningTriggeredState {state}, txKey={tx.get('txKey')}")
+        return AML_REJECT
+
+    aml_list = tx.get('amlList') or []
+    if not aml_list:
+        app.logger.error(f"KYT triggered but amlList is empty -- set CALLBACK_INCLUDE_KYT_REPORT=true, txKey={tx.get('txKey')}")
+        return AML_REJECT
+    pending = False
+    for aml in aml_list:
+        status = str(aml.get('status') or '').strip().upper()
+        if status == 'PENDING':
+            pending = True
+        elif status == 'COMPLETED':
+            # A completed report without a risk level is treated as UNKNOWN
+            risk_level = str(aml.get('riskLevel') or 'UNKNOWN').strip().upper()
+            if risk_level not in ALLOWED_RISK_LEVELS:
+                app.logger.warning(f"KYT risk {risk_level} from {aml.get('provider')}, txKey={tx.get('txKey')}")
+                return AML_REJECT
+        elif status != 'SKIPPED':
+            # FAILED, missing or unknown status -> manual handling
+            app.logger.error(f"KYT status {aml.get('status')} from {aml.get('provider')}, txKey={tx.get('txKey')}")
+            return AML_REJECT
+    return AML_WAIT if pending else AML_PASS
 ```
 
 ### Callback Types
 
 | `type` | Description |
 |--------|-------------|
-| `TRANSACTION` | Regular outbound transaction approval |
-| `TX_TRANSACTION` | API-initiated transaction approval |
-| `CONNECT_TX_SEND` | WalletConnect send transaction |
-| `TX_CONNECT_TX_SEND` | API-initiated WalletConnect send |
-| `TRANSACTION_BATCH_UTXO` | Batch UTXO transaction |
+| `TRANSACTION` | Transaction approval — branch further on `detail.transactionType` |
 | `MPC_SIGN` | MPC raw signing approval |
-| `ETH_SIGN` | Web3 eth_sign approval |
-| `PERSONAL_SIGN` | Web3 personal_sign approval |
-| `ETH_SIGN_TYPED_DATA` | Web3 eth_signTypedData approval |
-| `ETH_SIGNTRANSACTION` | Web3 eth_signTransaction approval |
+| `WEB3_SIGN` | Web3 signing approval — branch further on `detail.subjectType` (`ETH_SIGN` / `PERSONAL_SIGN` / `ETH_SIGN_TYPED_DATA` / `ETH_SIGNTRANSACTION`) |
+| `CALLBACK_TEST` | Connectivity test from the `cosigner callback-test` CLI; `detail` is empty |
+
+> Legacy values `TX_TRANSACTION`, `CONNECT_TX_SEND`, `TX_CONNECT_TX_SEND`, `TRANSACTION_BATCH_UTXO` (transaction) and `ETH_SIGN`, `PERSONAL_SIGN`, `ETH_SIGN_TYPED_DATA`, `ETH_SIGNTRANSACTION` (Web3) are also recognised by the Safeheron SDK — handle them in the same groups.
 
 ---
 
@@ -152,7 +287,7 @@ def evaluate_transaction_approval(tx):
 | `txHash` | String | Transaction hash (if available) |
 | `coinKey` | String | Coin identifier |
 | `txAmount` | String | Transaction amount |
-| `transactionType` | String | Transaction type |
+| `transactionType` | String | Transaction subtype: `NORMAL` / `UTXO_COLLECTION` / `AUTO_SWEEP` / `AUTO_FUEL` / `UTXO_BATCH_TRANSFER` / `GAS_SERVICE_DEPOSIT` — approve each with different rules |
 | `transactionStatus` | String | Current status |
 | `transactionSubStatus` | String | Sub-status |
 | `sourceAccountKey` | String | Sender wallet key |
@@ -167,13 +302,14 @@ def evaluate_transaction_approval(tx):
 | `note` | String | Transaction note |
 | `customerExt1` | String | Custom field 1 |
 | `customerExt2` | String | Custom field 2 |
-| `amlLock` | String | AML status: `YES` / `NO` |
-| `amlList` | List\<Aml\> | AML assessments (provider, riskLevel, etc.) |
+| `amlLock` | String | Whether the source address contains AML address(es): `YES` = contains / `NO` = does not contain |
+| `amlScreeningTriggeredState` | String | `IN_PROGRESS` (not yet decided, amlList unavailable) / `TRIGGERED` / `UNTRIGGERED` (amlList empty) |
+| `amlList` | List\<Aml\> | KYT results; only present when Co-Signer ≥ 2.1.1 and `CALLBACK_INCLUDE_KYT_REPORT=true`. Item fields: `provider` (`Elliptic` / `Chainalysis` / `MistTrack`), `status` (`PENDING` / `COMPLETED` / `SKIPPED` / `FAILED`), `riskLevel` (`LOW` / `MEDIUM` / `HIGH` / `SEVERE` / `UNKNOWN`), `timestamp`, `lastUpdateTime` |
 | `createTime` | Long | Unix timestamp (ms) |
 
 ---
 
-## Web3 Payload（type: ETH_SIGN / PERSONAL_SIGN / ETH_SIGN_TYPED_DATA / ETH_SIGNTRANSACTION）
+## Web3 Payload (type: WEB3_SIGN — branch on `subjectType`: ETH_SIGN / PERSONAL_SIGN / ETH_SIGN_TYPED_DATA / ETH_SIGNTRANSACTION)
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -223,7 +359,7 @@ Your callback service must return a **signed response** signed with your Callbac
 
 | Field | Type | Values |
 |-------|------|--------|
-| `action` | String | `APPROVE` or `REJECT` |
+| `action` | String | `APPROVE` or `REJECT`. Any other value leaves the approval pending and Co-Signer retries every 5s (used to wait for KYT results) |
 | `approvalId` | String | Echo back the incoming `approvalId` |
 
 ---
@@ -243,6 +379,20 @@ Your callback service must return a **signed response** signed with your Callbac
 | Config changes | Modify `.env` then run `stop` + `start` to reload                       |
 | Update Callback URL | Web Console update takes effect within 5 min — no Co-Signer restart needed |
 | IP whitelist | Add Co-Signer host IP to the API Key IP whitelist in Console            |
+
+---
+
+## Co-Signer Version History
+
+| Version | Date | Changes |
+|---------|------|---------|
+| 2.1.5 | 2026-09-21 | Added support for the XRP chain; added `schemaType` field in the TEE signing structure to indicate the format of the data to be signed; upgraded dependencies to strengthen system security |
+| 2.1.4 | 2026-07-14 | Fixed an issue where restarting an inactive Co-Signer caused it to be locked and unable to activate |
+| 2.1.3 | 2026-05-10 | Adjusted MPC Sign structure to improve support for message signing initiated by the Message Signing Tool |
+| 2.1.2 | 2026-04-21 | Fixed incorrect serialization of hex strings in personal sign; fixed ABI parsing failure caused by dependency version inconsistency; fixed validation failure when the target address is empty in contract deployment scenarios |
+| 2.1.1 | 2026-04-08 | Added the AML screening trigger status field in callback notifications; upgraded underlying service framework to improve system stability |
+
+> The 2.1.1 release note spells the field `amlScreeningTriggerState`; the callback field documented in the Approval Callback Service reference (and used by the SDKs) is `amlScreeningTriggeredState`. XRP chain support was added in **2.1.5**; KYT data in callbacks needs **2.1.1+** (see [AML / KYT Handling](#aml--kyt-handling-in-the-callback)).
 
 ---
 
@@ -366,6 +516,6 @@ The Approval Callback Service must:
 
 1. **Verify the Co-Signer identity signature** on every request before processing
 2. **Only accept connections from the Co-Signer host IP** — configure firewall/IP whitelist on the callback service
-3. **Validate `customerRefId`** — reject any callback for a `customerRefId` not found in your DB
-4. **Validate amount and destination** — cross-check against the original withdrawal order
+3. **Apply the rules for each `transactionType`** — for `NORMAL` / `UTXO_BATCH_TRANSFER`, the `customerRefId` must match a pending order and coin, every destination address, amount and memo must match it; system subtypes (`AUTO_SWEEP`, `AUTO_FUEL`, `UTXO_COLLECTION`, `GAS_SERVICE_DEPOSIT`) follow their own rules — see `passes_business_rules`
+4. **Apply the AML / KYT rules** — see `evaluate_aml`
 5. **Respond within 5 seconds** — Co-Signer will time out otherwise (sync server time via NTP)

@@ -10,6 +10,12 @@ Module path: `github.com/Safeheron/safeheron-api-sdk-go`
 
 Requires: Go 1.18+
 
+> **Known dependency conflict (SDK v1.0.15):** the SDK's `go.mod` pins `github.com/consensys/gnark-crypto v0.19.2`, but its own dependency `github.com/crate-crypto/go-kzg-4844 v0.7.0` (pulled in by `go-ethereum v1.13.15`) needs `v0.12.1`. If your program imports go-ethereum transaction packages (e.g. `core/types`, used in the MPC Sign / Web3 signing examples), the build fails inside `go-kzg-4844` with `ScalarMultiplicationAffine undefined`. Workaround — add to your `go.mod`:
+>
+> ```
+> replace github.com/consensys/gnark-crypto => github.com/consensys/gnark-crypto v0.12.1
+> ```
+
 ## Clone and Build Locally
 
 ```bash

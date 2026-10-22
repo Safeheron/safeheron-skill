@@ -64,7 +64,7 @@ customer_ref_id = str(uuid.uuid4())
 `ONE_TIME_ADDRESS` must only be used for genuinely temporary, one-off payment scenarios.
 
 **2-3. AML check is mandatory before every transfer.**
-Use KYA screening via `ComplianceApi` to screen the destination address before creating the transaction.
+Use KYA screening via `ComplianceApi` to screen the destination address before creating the transaction. Block or alert on HIGH / SEVERE (and, by default, UNKNOWN) risk results.
 
 ```python
 from safeheron_api_sdk_python.api.compliance_api import ComplianceApi, CreateKyaScreeningRequest, KyaScreeningOneRequest
@@ -72,7 +72,7 @@ import time
 
 screen_param = CreateKyaScreeningRequest()
 screen_param.address = destination_address
-screen_param.chainType = 'ETH'
+screen_param.chainType = 'EVM'  # valid values via kya_supported_networks()
 screen_param.providers = ['Chainalysis']
 created = compliance_api.create_kya_screening(screen_param)
 
@@ -83,9 +83,21 @@ for i in range(30):
     if result.get('status') == 'FINISHED':
         break
     time.sleep(2)
-for order in result.get('orders', []):
-    if order.get('riskLevel') in ('HIGH', 'SEVERE'):
-        raise RuntimeError(f"AML check failed: {destination_address} is {order['riskLevel']} risk")
+# Fail closed: an unfinished screening is NOT a pass
+if result.get('status') != 'FINISHED':
+    raise RuntimeError(f"KYA screening not finished for {destination_address}, route to manual review")
+orders = result.get('orders') or []
+if not orders:
+    raise RuntimeError(f"KYA screening returned no provider result for {destination_address}")
+# Whitelist: only LOW / MEDIUM pass (adjust per your policy); HIGH, SEVERE, UNKNOWN, a missing level or FAILED are blocked
+ALLOWED_RISK_LEVELS = {'LOW', 'MEDIUM'}
+for order in orders:
+    if order.get('status') == 'SKIPPED':
+        continue  # manually skipped in Web Console
+    if order.get('status') != 'COMPLETED':
+        raise RuntimeError(f"KYA screening {order.get('status')} ({order.get('provider')}), route to manual review")
+    if order.get('riskLevel') not in ALLOWED_RISK_LEVELS:
+        raise RuntimeError(f"AML check failed: {destination_address} is {order.get('riskLevel')} risk")
 ```
 
 **2-4. Validate address format before whitelist add or transfer.**
@@ -97,9 +109,13 @@ coin_api = CoinApi(config)
 param = CheckCoinAddressRequest()
 param.coinKey = "ETHEREUM_ETH"
 param.address = destination_address
+param.checkAddressValid = True   # required — without it addressValid is not checked
+param.checkAml = True            # required — without it amlValid defaults to True
 resp = coin_api.check_coin_address(param)
 if not resp.get('addressValid'):
     raise ValueError(f"Invalid address format: {destination_address}")
+if not resp.get('amlValid'):
+    raise ValueError(f"Address is on the AML blacklist: {destination_address}")
 ```
 
 **2-5. Amounts must use `str` in API requests and `Decimal` in application logic.**
@@ -122,44 +138,17 @@ param.txAmount = str(Decimal("0.001"))
 
 ### Rules for Generated Code
 
-**The Co-Signer callback service must never blindly approve all transactions.**
-Every approval callback must implement the following business validations before returning `APPROVE`:
+**The Co-Signer callback service must never blindly approve anything.** Use the Flask callback service in [COSIGNER.md](COSIGNER.md) (`decide()` + `passes_business_rules()` + `evaluate_aml()`) as the REQUIRED pattern — do not write a reduced version. It enforces:
 
-| Validation | What to Check |
+| Rule | What it checks |
 |---|---|
-| `customerRefId` | Must match a real pending business order in your system |
-| Amount | Must exactly match the amount recorded in your business system |
-| Destination address | Must exactly match the address recorded in your business system |
-
-```python
-from flask import Flask, request, jsonify
-from decimal import Decimal
-
-app = Flask(__name__)
-
-@app.route('/cosigner/callback', methods=['POST'])
-def handle_callback():
-    raw_body = request.get_json(force=True)
-
-    # 1. Decrypt and verify signature (always first)
-    biz_content = converter.request_v3_convert(raw_body)
-    tx = biz_content.get('detail', {})
-
-    # 2. Look up the business order
-    order = find_order_by_ref_id(tx.get('customerRefId'))
-    if order is None:
-        return make_reject_response(biz_content, "Unknown order")
-
-    # 3. Validate amount
-    if Decimal(tx.get('txAmount', '0')) != order['expected_amount']:
-        return make_reject_response(biz_content, "Amount mismatch")
-
-    # 4. Validate destination address
-    if tx.get('destinationAddress', '').lower() != order['destination_address'].lower():
-        return make_reject_response(biz_content, "Address mismatch")
-
-    return make_approve_response(biz_content)
-```
+| Default REJECT | Unknown callback types, unknown `transactionType`, parse errors → `REJECT` |
+| `MPC_SIGN` / `WEB3_SIGN` | Verified against your pending sign request (`dataList`, `messageHash` / `message` / `transaction`) — never auto-approved |
+| `NORMAL` / `UTXO_BATCH_TRANSFER` | `customerRefId` matches a real pending order; coin (`coinKey`) and **every** destination address + amount + memo match it (UTXO coins use `destinationAddressList`) |
+| `UTXO_COLLECTION` / `AUTO_FUEL` | Destination account type is `VAULT_ACCOUNT` (+ fuel policy) |
+| `AUTO_SWEEP` | Destination account and USD amount match your Auto Sweep policy |
+| `GAS_SERVICE_DEPOSIT` | Deposit exists in your records and destination account type is `PROFILE_ACCOUNT` |
+| AML / KYT | Only `LOW` / `MEDIUM` pass (`HIGH` / `SEVERE` / `UNKNOWN` / unexpected values rejected); `FAILED` or unknown status rejected; wait (neither APPROVE nor REJECT) while `IN_PROGRESS` / `PENDING`, then reject after ~5 min — see [AML / KYT Handling](COSIGNER.md#aml--kyt-handling-in-the-callback) |
 
 **Additional Co-Signer deployment rules:**
 - The Co-Signer host must be in a **private isolated network**.
@@ -177,8 +166,8 @@ The `WebhookConverter.converter()` method handles this automatically -- it raise
 
 **4-2. Webhook endpoint must use HTTPS** in production.
 
-**4-3. Idempotency is required.**
-Safeheron retries delivery up to 7 times. The handler must safely process duplicate events.
+**4-3. Durable ack + idempotency are required.**
+Failed deliveries are retried 6 times (30s, 1m, 5m, 1h, 12h, 24h) and duplicates can arrive anyway. Ack `{'code': '200', 'message': 'SUCCESS'}` only after the verified event is **durably stored** (DB inbox / durable MQ) -- never after handing it to an in-memory queue or a background thread. Commit the idempotency mark and the business side effect in the **same DB transaction**; never commit a dedup row first and process afterwards. `resend_failed` re-pushes failed TRANSACTION_*, MPC_SIGN_*, WEB3_SIGN_*, ILLEGAL_IP_REQUEST, NO_MATCHING_TRANSACTION_POLICY, WHITELIST_*, GAS_BALANCE_WARNING and AML_KYT_ALERT events -- but NOT TOKEN_BLACKLIST_ADDRESS_HIT, so durable storage before ack is still mandatory. See [WEBHOOK.md](WEBHOOK.md).
 
 **4-4. IP whitelist -- only accept from Safeheron egress IPs.**
 - `18.162.105.64`
@@ -198,7 +187,7 @@ def is_terminal_status(status):
 
 ```python
 # In async processor:
-def process_webhook_event(event):
+def process_webhook_event(event):  # event = eventDetail of a TRANSACTION_* webhook
     tx = find_transaction_by_tx_key(event['txKey'])
     if tx and is_terminal_status(tx['status']):
         # Ignore late event for terminal transaction
@@ -209,7 +198,7 @@ def process_webhook_event(event):
 **4-7. Implement REST API polling as fallback.**
 
 **4-8. Handle failed Webhook re-delivery.**
-Call the transaction query API periodically to catch missed events.
+Call the transaction query API periodically to catch missed events (set `createTimeMin` explicitly -- List Transactions V2 defaults to the last 24 hours).
 
 ---
 
@@ -240,7 +229,7 @@ Call the transaction query API periodically to catch missed events.
 | AML check | Mandatory before every outbound transfer via ComplianceApi KYA screening |
 | Address validation | Mandatory before whitelist add or transfer via CoinApi.check_coin_address() |
 | Amounts | str in API, Decimal in code; never float |
-| Co-Signer callback | Validate customerRefId + amount + address against business system |
+| Co-Signer callback | Use the Flask callback service (COSIGNER.md): rules per transactionType (order + coin + address + amount + memo for NORMAL), AML/KYT whitelist, default REJECT |
 | Webhook | HTTPS only; verify signature; idempotent; IP whitelist |
 | Webhook ordering | Terminal state wins; discard late intermediate-state events |
 | Webhook fallback | REST API polling |

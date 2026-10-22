@@ -60,72 +60,52 @@ Each new policy requires approval by team admins in the Safeheron App before it 
 
 ## 5. Scenario: API Co-Signer -- Approval Callback Logic
 
-When the API Co-Signer is the approver, it calls your **Approval Callback Service**:
+When the API Co-Signer is the approver, it calls your **Approval Callback Service**. Start from the handler in [COSIGNER.md](COSIGNER.md) — it already handles callback types, per-`transactionType` business rules and AML/KYT — and add your policy tiers to its `decide()` function, **before** the AML check (so over-limit transactions are rejected immediately instead of waiting for KYT):
 
 ```go
-func callbackHandler(w http.ResponseWriter, r *http.Request) {
-    body, _ := io.ReadAll(r.Body)
-    defer r.Body.Close()
+// Replaces steps 1–2 at the end of the TRANSACTION case in decide() (do not keep both copies):
 
-    var callbackPayload cosigner.CoSignerCallBackV3
-    json.Unmarshal(body, &callbackPayload)
+// 1. Business rules by transactionType (order matching for NORMAL / UTXO_BATCH_TRANSFER, system rules otherwise)
+if !passesBusinessRules(tx) {
+    return "REJECT"
+}
 
-    // 1. Verify signature using Co-Signer identity public key
-    bizContent, err := coSignerConverter.RequestV3Convert(callbackPayload)
+// 2. Policy tier — defense in depth: your Safeheron policy should already route large amounts to human
+//    approvers; if one still reaches the Co-Signer, reject it
+if !isWithinAutoApprovalLimit(tx) {
+    log.Printf("REJECT: amount %s %s exceeds auto-approval limit, txKey=%s", tx.TxAmount, tx.CoinKey, tx.TxKey)
+    return "REJECT"
+}
+
+// 3. AML / KYT — only LOW / MEDIUM pass; waits (neither APPROVE nor REJECT) while screening is unfinished
+switch evaluateAml(env.ApprovalId, tx) {
+case AmlPass:
+    return "APPROVE"
+case AmlWait:
+    return ActionWait
+default:
+    return "REJECT"
+}
+```
+
+```go
+// Package-level, same package as COSIGNER.md's handler (decimal is already imported there).
+// Limits are per coin, in the coin's own unit — never compare raw amounts of different coins against one number
+var autoApprovalLimits = map[string]decimal.Decimal{
+    "ETHEREUM_ETH":              decimal.RequireFromString("10"),
+    "USDT(ERC20)_ETHEREUM_USDT": decimal.RequireFromString("50000"),
+}
+
+func isWithinAutoApprovalLimit(tx TransactionApproval) bool {
+    limit, ok := autoApprovalLimits[tx.CoinKey]
+    if !ok {
+        return false // unknown coin — fail closed
+    }
+    amount, err := decimal.NewFromString(tx.TxAmount)
     if err != nil {
-        log.Printf("Co-Signer verification failed: %v", err)
-        http.Error(w, "Verification failed", http.StatusForbidden)
-        return
+        return false // missing or malformed amount — fail closed
     }
-
-    var content map[string]interface{}
-    json.Unmarshal([]byte(bizContent), &content)
-
-    // 2. Verify customerRefId exists in your DB
-    customerRefId, _ := content["customerRefId"].(string)
-    order := findOrderByCustomerRefId(customerRefId)
-    if order == nil {
-        log.Printf("REJECT: unknown customerRefId %s", customerRefId)
-        respondReject(w, "Unknown transaction")
-        return
-    }
-
-    // 3. Verify amount matches
-    txAmount, _ := decimal.NewFromString(content["txAmount"].(string))
-    if !txAmount.Equal(order.ExpectedAmount) {
-        log.Printf("REJECT: amount mismatch for %s", customerRefId)
-        respondReject(w, "Amount mismatch")
-        return
-    }
-
-    // 4. Verify destination address matches
-    destAddress, _ := content["destinationAddress"].(string)
-    if destAddress != order.DestinationAddress {
-        log.Printf("REJECT: destination mismatch for %s", customerRefId)
-        respondReject(w, "Destination mismatch")
-        return
-    }
-
-    // 5. Check AML risk
-    if amlList, ok := content["amlList"].([]interface{}); ok {
-        for _, aml := range amlList {
-            amlMap, _ := aml.(map[string]interface{})
-            if riskLevel, _ := amlMap["riskLevel"].(string); riskLevel == "HIGH" {
-                respondReject(w, "High AML risk")
-                return
-            }
-        }
-    }
-
-    // 6. Check amount within auto-approval limit
-    autoApprovalLimit, _ := decimal.NewFromString("100000")
-    if txAmount.GreaterThan(autoApprovalLimit) {
-        respondReject(w, "Exceeds auto-approval limit")
-        return
-    }
-
-    // 7. All checks passed
-    respondApprove(w, customerRefId)
+    return !amount.IsNegative() && amount.LessThanOrEqual(limit)
 }
 ```
 
@@ -137,7 +117,7 @@ func callbackHandler(w http.ResponseWriter, r *http.Request) {
 |----------------|----------------|
 | API Key sends to an address NOT in the whitelist | Transaction blocked by policy |
 | API Key initiates from a wallet it's not authorized to use | Transaction blocked by policy |
-| Withdrawal amount exceeds per-tx auto-approval threshold | Escalated to Ops Team |
+| Withdrawal amount exceeds per-tx auto-approval threshold | Routed by policy to the Ops Team for manual review; the Co-Signer callback rejects it if it ever reaches it |
 | 24H cumulative total exceeds limit | Escalated to higher approval tier |
 | Transaction with no matching policy | Blocked; `NO_MATCHING_TRANSACTION_POLICY` webhook fires |
 

@@ -37,10 +37,10 @@ accountKey := resp.AccountKey // save this -- permanent wallet identifier
 
 | Field | Required | Type | Description |
 |-------|----------|------|-------------|
-| `AccountName` | Yes | `string` | Wallet display name |
+| `AccountName` | No | `string` | Account name, 50 characters max |
 | `CustomerRefId` | No | `string` | Merchant unique business ID (max 100 chars). Duplicate submissions with the same ID return the same wallet |
 | `HiddenOnUI` | No | `*bool` | If true, wallet is hidden in Web Console / App |
-| `AutoFuel` | No | `*bool` | If true, Gas Station auto-tops up gas when a transaction is initiated. Default: false |
+| `AutoFuel` | No | `*bool` | Auto-refuel. If set to true, the Gas Service will automatically supplement the Gas fee for the wallet when a transaction is initiated. Default: false |
 | `AccountTag` | No | `string` | Tag applied at creation. Values: `DEPOSIT`, `NONE`. Required for Auto-Sweep |
 | `CoinKeyList` | No | `[]string` | Coin keys to add at creation (max 20) |
 
@@ -149,6 +149,30 @@ if err := accountApi.BatchUpdateAccountTag(req, &resp); err != nil {
 |-------|-------------|
 | `DEPOSIT` | Mark as deposit wallet -- eligible for Auto Sweep |
 | `NONE` | Remove DEPOSIT label |
+
+---
+
+## Batch Set Auto-Fuel
+
+Set the `autoFuel` property for up to 100 wallet accounts. `true` = the Gas Service automatically supplements the transaction fee (Gas) for the wallet when a transaction is initiated; `false` = it no longer does.
+
+```go
+autoFuel := true
+req := api.BatchUpdateAccountFuelRequest{
+    AccountKeyList: []string{"your-account-key"}, // required, max 100
+    AutoFuel:       &autoFuel,                    // required
+}
+
+var resp api.ResultResponse
+if err := accountApi.BatchUpdateAccountAutofuel(req, &resp); err != nil {
+    panic(fmt.Errorf("failed to set autoFuel: %w", err))
+}
+```
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `AccountKeyList` | Yes | `[]string` | Account keys, max 100 |
+| `AutoFuel` | Yes | `*bool` | If true, Gas Service automatically supplements the transaction fee (Gas) for the wallet when a transaction is initiated |
 
 ---
 

@@ -60,57 +60,52 @@ Each new policy requires approval by team admins in the Safeheron App before it 
 
 ## 5. Scenario: API Co-Signer -- Approval Callback Logic
 
-When the API Co-Signer is the approver, it calls your **Approval Callback Service**. Implement rigorous checks:
+When the API Co-Signer is the approver, it calls your **Approval Callback Service**. Start from the Flask callback service in [COSIGNER.md](COSIGNER.md) — it already handles callback types, per-`transactionType` business rules and AML/KYT — and add your policy tiers to its `decide()` function, **before** the AML check (so over-limit transactions are rejected immediately instead of waiting for KYT):
 
 ```python
-from flask import Flask, request, jsonify
-from decimal import Decimal
-from safeheron_api_sdk_python.cosigner.co_signer_converter import CoSignerConverter, CoSignerResponseV3
+from decimal import Decimal, InvalidOperation
 
-app = Flask(__name__)
+# Limits are per coin, in the coin's own unit -- never compare raw amounts of different coins against one number
+AUTO_APPROVAL_LIMITS = {
+    'ETHEREUM_ETH': Decimal('10'),
+    'USDT(ERC20)_ETHEREUM_USDT': Decimal('50000'),
+}
 
-AUTO_APPROVAL_LIMIT = Decimal('100000')
 
-@app.route('/cosigner/callback', methods=['POST'])
-def handle_callback():
-    raw_body = request.get_json(force=True)
+def within_auto_approval_limit(tx):
+    # Unknown coin, missing / malformed / NaN / Infinity / negative amount -> never within the limit (fail closed)
+    limit = AUTO_APPROVAL_LIMITS.get(tx.get('coinKey'))
+    if limit is None:
+        return False
+    try:
+        amount = Decimal(tx.get('txAmount'))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    return amount.is_finite() and Decimal('0') <= amount <= limit
 
-    # 1. Verify signature using Co-Signer identity public key -- REJECT if invalid
-    biz_content = converter.request_v3_convert(raw_body)
-    tx = biz_content.get('detail', {})
 
-    action = "APPROVE"
+# Replaces the steps after the callback-type checks at the end of decide() in COSIGNER.md
+# (do not keep both copies; detail = TransactionApproval dict):
 
-    # 2. Verify customerRefId exists in your DB
-    order = find_order_by_ref_id(tx.get('customerRefId'))
-    if order is None:
-        action = "REJECT"
+    # 1. Business rules by transactionType (order matching for NORMAL / UTXO_BATCH_TRANSFER, system rules otherwise)
+    if not passes_business_rules(detail):
+        return 'REJECT'
 
-    # 3. Verify amount matches
-    elif Decimal(tx.get('txAmount', '0')) != order['expected_amount']:
-        action = "REJECT"
+    # 2. Policy tier -- defense in depth: your Safeheron policy should already route large amounts to human
+    #    approvers; if one still reaches the Co-Signer, reject it
+    if not within_auto_approval_limit(detail):
+        app.logger.warning(f"REJECT: amount {detail.get('txAmount')} {detail.get('coinKey')} exceeds auto-approval limit, "
+                           f"txKey={detail.get('txKey')}")
+        return 'REJECT'
 
-    # 4. Verify destination address matches
-    elif tx.get('destinationAddress', '').lower() != order['destination_address'].lower():
-        action = "REJECT"
-
-    # 5. Check AML risk
-    else:
-        for aml in tx.get('amlList', []):
-            if aml.get('riskLevel', '').upper() == 'HIGH':
-                action = "REJECT"
-                break
-
-    # 6. Check amount within auto-approval limit
-    if action == "APPROVE" and Decimal(tx.get('txAmount', '0')) > AUTO_APPROVAL_LIMIT:
-        action = "REJECT"
-
-    response = CoSignerResponseV3()
-    response.action = action
-    response.approvalId = biz_content.get('approvalId', '')
-    encrypted_response = converter.response_v3_converter(response)
-    return jsonify(encrypted_response)
+    # 3. AML / KYT -- only LOW / MEDIUM pass; waits (neither APPROVE nor REJECT) while screening is unfinished
+    aml_decision = evaluate_aml(approval_id, detail)
+    if aml_decision == AML_WAIT:
+        return ACTION_WAIT
+    return 'APPROVE' if aml_decision == AML_PASS else 'REJECT'
 ```
+
+**The callback service is a critical security control point.** A weak implementation here undermines the entire approval system.
 
 ---
 
@@ -120,7 +115,7 @@ def handle_callback():
 |----------------|----------------|
 | API Key sends to an address NOT in the whitelist | Transaction blocked by policy |
 | API Key initiates from a wallet it's not authorized to use as source | Transaction blocked by policy |
-| Withdrawal amount exceeds the per-tx auto-approval threshold | Escalated to Ops Team |
+| Withdrawal amount exceeds the per-tx auto-approval threshold | Routed by policy to the Ops Team for manual review; the Co-Signer callback rejects it if it ever reaches it |
 | 24H cumulative total exceeds limit within a single day | Escalated to higher approval tier |
 | Transaction with no matching policy | Blocked; `NO_MATCHING_TRANSACTION_POLICY` webhook fires |
 

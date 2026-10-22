@@ -57,14 +57,15 @@ req.setDestinationAccountType("WHITELISTING_ACCOUNT");
 ```
 
 **2-3. AML check is mandatory before every transfer.**
-Use KYA screening via `ComplianceApiService` to screen the destination address. Block or alert on HIGH/SEVERE risk results before creating the transaction.
+Use KYA screening via `ComplianceApiService` to screen the destination address. Block or alert on HIGH / SEVERE (and, by default, UNKNOWN) risk results before creating the transaction.
 
 ```java
 // Required before creating any outbound transaction
 ComplianceApiService complianceApi = ServiceCreator.create(ComplianceApiService.class, config);
 KyaScreeningRequest kyaReq = new KyaScreeningRequest();
 kyaReq.setAddress(destinationAddress);
-kyaReq.setChainType("ETH");
+kyaReq.setChainType("EVM");          // valid values: complianceApi.kyaSupportedNetworks()
+kyaReq.setNetwork("Ethereum");
 kyaReq.setProviders(Arrays.asList("Chainalysis"));
 KyaScreeningCreateResponse created = ServiceExecutor.execute(complianceApi.kyaScreeningCreate(kyaReq));
 
@@ -76,8 +77,23 @@ for (int i = 0; i < 30; i++) {
     if ("FINISHED".equals(result.getStatus())) break;
     Thread.sleep(2000);
 }
+// Fail closed: an unfinished screening is NOT a pass
+if (!"FINISHED".equals(result.getStatus())) {
+    throw new SecurityException("KYA screening not finished for " + destinationAddress + ", route to manual review");
+}
+if (result.getOrders() == null || result.getOrders().isEmpty()) {
+    throw new SecurityException("KYA screening returned no provider result for " + destinationAddress);
+}
+// Whitelist: only LOW / MEDIUM pass (adjust per your policy); HIGH, SEVERE, UNKNOWN, a missing level or FAILED are blocked
+Set<String> allowedRiskLevels = Set.of("LOW", "MEDIUM");
 for (KyaScreeningOneResponse.Order order : result.getOrders()) {
-    if ("HIGH".equals(order.getRiskLevel()) || "SEVERE".equals(order.getRiskLevel())) {
+    if ("SKIPPED".equals(order.getStatus())) {
+        continue;   // manually skipped in Web Console
+    }
+    if (!"COMPLETED".equals(order.getStatus())) {
+        throw new SecurityException("KYA screening " + order.getStatus() + " (" + order.getProvider() + "), route to manual review");
+    }
+    if (order.getRiskLevel() == null || !allowedRiskLevels.contains(order.getRiskLevel())) {
         throw new SecurityException("AML check failed: " + destinationAddress + " is " + order.getRiskLevel() + " risk");
     }
 }
@@ -89,11 +105,16 @@ Call `CoinApiService.checkCoinAddress()` to verify address validity. Never trust
 ```java
 CoinApiService coinApi = ServiceCreator.create(CoinApiService.class, config);
 CheckCoinAddressRequest checkReq = new CheckCoinAddressRequest();
-checkReq.setCoinKey("ETH");
+checkReq.setCoinKey("ETHEREUM_ETH");
 checkReq.setAddress(destinationAddress);
+checkReq.setCheckAddressValid(true);   // without this flag the format is not checked
+checkReq.setCheckAml(true);            // without this flag amlValid is always true
 CheckCoinAddressResponse checkResp = ServiceExecutor.execute(coinApi.checkCoinAddress(checkReq));
-if (!checkResp.getAddressValid()) {
+if (!Boolean.TRUE.equals(checkResp.getAddressValid())) {
     throw new IllegalArgumentException("Invalid address format: " + destinationAddress);
+}
+if (!Boolean.TRUE.equals(checkResp.getAmlValid())) {
+    throw new IllegalArgumentException("Address is on the AML blacklist: " + destinationAddress);
 }
 ```
 
@@ -115,59 +136,17 @@ req.setAmount(new BigDecimal("0.001").toPlainString());
 
 ### Rules for Generated Code
 
-**The Co-Signer callback service must never blindly approve all transactions.**
-Every approval callback must implement the following business validations before returning `APPROVE`:
+**The Co-Signer callback service must never blindly approve anything.** Use `CoSignerCallbackController` in [COSIGNER.md](COSIGNER.md) as the REQUIRED pattern — do not write a reduced version. It enforces:
 
-| Validation | What to Check |
+| Rule | What it checks |
 |---|---|
-| `customerRefId` | Must match a real pending business order in your system |
-| Amount | Must exactly match the amount recorded in your business system for that order |
-| Destination address | Must exactly match the address recorded in your business system for that order |
-
-```java
-// REQUIRED pattern for Co-Signer approval callback
-@PostMapping("/cosigner/callback")
-public Map<String,String> handleCallback(@RequestBody CoSignerCallBackV3 encryptedBody) throws Exception {
-    // 1. Decrypt and verify signature using Co-Signer identity public key
-    CoSignerBizContentV3 bizContent = coSignerConverter.requestV3Convert(encryptedBody);
-
-    // Default response — always REJECT unless all checks pass
-    CoSignerResponseV3 response = new CoSignerResponseV3();
-    response.setApprovalId(bizContent.getApprovalId());
-    response.setAction("REJECT");
-
-    if (!"TRANSACTION".equals(bizContent.getType()) && !"TX_TRANSACTION".equals(bizContent.getType())) {
-        log.warn("Unhandled callback type: {}", bizContent.getType());
-        return coSignerConverter.responseV3Converter(response);
-    }
-
-    // Parse the transaction detail from the V3 envelope
-    TransactionApproval tx = parseTransactionDetail(bizContent.getDetail());
-
-    // 2. Look up the business order
-    BusinessOrder order = orderService.findByCustomerRefId(tx.getCustomerRefId());
-    if (order == null) {
-        log.warn("REJECT: unknown customerRefId {}", tx.getCustomerRefId());
-        return coSignerConverter.responseV3Converter(response);
-    }
-
-    // 3. Validate amount matches business system
-    if (new BigDecimal(tx.getTxAmount()).compareTo(order.getExpectedAmount()) != 0) {
-        log.warn("REJECT: amount mismatch for {}", tx.getCustomerRefId());
-        return coSignerConverter.responseV3Converter(response);
-    }
-
-    // 4. Validate destination address matches
-    if (!tx.getDestinationAddress().equalsIgnoreCase(order.getDestinationAddress())) {
-        log.warn("REJECT: destination mismatch for {}", tx.getCustomerRefId());
-        return coSignerConverter.responseV3Converter(response);
-    }
-
-    // All checks passed — approve
-    response.setAction("APPROVE");
-    return coSignerConverter.responseV3Converter(response);
-}
-```
+| Default REJECT | Unknown callback types, unknown `transactionType`, parse errors → `REJECT` |
+| `MPC_SIGN` / `WEB3_SIGN` | Verified against your pending sign request (`dataList`, `messageHash` / `message` / `transaction`) — never auto-approved |
+| `NORMAL` / `UTXO_BATCH_TRANSFER` | `customerRefId` matches a real pending order; coin (`coinKey`) and **every** destination address + amount + memo match it (UTXO coins use `destinationAddressList`) |
+| `UTXO_COLLECTION` / `AUTO_FUEL` | Destination account type is `VAULT_ACCOUNT` (+ fuel policy) |
+| `AUTO_SWEEP` | Destination account and USD amount match your Auto Sweep policy |
+| `GAS_SERVICE_DEPOSIT` | Deposit exists in your records and destination account type is `PROFILE_ACCOUNT` |
+| AML / KYT | Only `LOW` / `MEDIUM` pass (`HIGH` / `SEVERE` / `UNKNOWN` / unexpected values rejected); `FAILED` or unknown status rejected; wait (neither APPROVE nor REJECT) while `IN_PROGRESS` / `PENDING`, then reject after ~5 min — see [AML / KYT Handling](COSIGNER.md#aml--kyt-handling-in-the-callback) |
 
 **Additional Co-Signer deployment rules:**
 - The Co-Signer host must be in a **private isolated network** — never exposed to the public internet.
@@ -187,10 +166,10 @@ Every incoming Webhook payload must have its `sig` field verified using Safehero
 Never expose an HTTP Webhook endpoint in production.
 
 **4-3. Idempotency is required.**
-Safeheron retries delivery up to 7 times (30s → 1m → 5m → 1h → 12h → 24h). The handler must safely process duplicate events — never double-credit a deposit or double-process a withdrawal.
+Failed deliveries are retried 6 times (30s → 1m → 5m → 1h → 12h → 24h), and duplicates can arrive anyway. The handler must safely process duplicate events — never double-credit a deposit or double-process a withdrawal. Commit the idempotency marker in the **same DB transaction** as the business side effects; never insert a dedup row and commit before doing the work.
 
 **4-4. IP whitelist — only accept from Safeheron egress IPs.**
-Configure firewall/VPC security groups to only allow inbound Webhook/callback traffic from:
+Configure firewall/VPC security groups to only allow inbound Webhook/callback traffic from (not listed in the published API reference — confirm the current list with Safeheron Support):
 - `18.162.105.64`
 - `18.167.22.59`
 - `18.167.21.182`
@@ -203,20 +182,37 @@ Webhooks may arrive out of order. If a terminal-state event was already processe
 
 ```java
 @PostMapping("/webhook")
-public ResponseEntity<String> handleWebhook(@RequestBody WebhookRequest request) {
-    // 1. Verify signature — reject if invalid
-    if (!webhookVerifier.verify(request)) {
-        log.warn("Webhook signature verification failed");
-        return ResponseEntity.status(401).body("Signature verification failed");
+public ResponseEntity<WebHookResponse> handleWebhook(@RequestBody WebHook webHook) {
+    // 1. Verify signature + decrypt — convert() throws SafeheronException if the signature is invalid
+    WebHookBizContent content;
+    try {
+        content = webhookConverter.convert(webHook);
+    } catch (SafeheronException e) {
+        log.error("Webhook signature verification failed", e);
+        return ResponseEntity.status(401).build();
+    } catch (Exception e) {
+        log.error("Webhook decrypt/parse error — check your webhook RSA private key", e);
+        return ResponseEntity.status(500).build();
     }
 
-    // 2. Return 200 immediately; process asynchronously
-    eventQueue.publish(request);
-    return ResponseEntity.ok("OK");
+    // 2. Store the verified event durably (DB inbox with a unique key, or a durable MQ), then ack.
+    //    In-memory queues / @Async lose events on a crash, and TOKEN_BLACKLIST_ADDRESS_HIT cannot be re-pushed
+    //    by resend/failed. If storing throws, the 500 makes Safeheron retry (6 times).
+    //    Body per docs: {"code":"200","message":"SUCCESS"}. Inbox pattern: see WEBHOOK.md Steps 2–3.
+    try {
+        webhookInbox.saveIfAbsent(eventKey(content), content.getEventType(), objectMapper.writeValueAsString(content));
+    } catch (Exception e) {
+        log.error("Failed to store webhook event", e);
+        return ResponseEntity.status(500).build();
+    }
+    WebHookResponse ack = new WebHookResponse();
+    ack.setCode("200");
+    ack.setMessage("SUCCESS");
+    return ResponseEntity.ok(ack);
 }
 
-// In async processor:
-void processWebhookEvent(WebhookEvent event) {
+// In the inbox worker (inside the same @Transactional method that marks the inbox row DONE):
+void processWebhookEvent(TransactionParam event) {  // eventDetail of TRANSACTION_* events
     Transaction tx = transactionRepository.findByTxKey(event.getTxKey());
     if (tx == null) {
         tx = new Transaction();
@@ -225,11 +221,11 @@ void processWebhookEvent(WebhookEvent event) {
     // 4-5 & 4-6: Never roll back status; terminal state wins
     if (isTerminalStatus(tx.getStatus())) {
         log.info("Ignoring late event for terminal transaction: txKey={}, incomingStatus={}",
-                event.getTxKey(), event.getStatus());
+                event.getTxKey(), event.getTransactionStatus());
         return;
     }
 
-    tx.setStatus(event.getStatus());
+    tx.setStatus(event.getTransactionStatus());
     transactionRepository.save(tx);
 }
 
@@ -243,7 +239,7 @@ private boolean isTerminalStatus(String status) {
 Do not rely solely on Webhooks for transaction state synchronization. Run a periodic polling job against the transaction list API to catch any missed events.
 
 **4-8. Handle failed Webhook re-delivery.**
-Call `/v1/webhook/resend` periodically to re-request delivery of events that failed to reach your server.
+Call `/v1/webhook/resend/failed` (`resendFailed`) periodically to re-request delivery of events that failed to reach your server. Supported event types (per the published docs): `TRANSACTION_CREATED`, `TRANSACTION_STATUS_CHANGED`, `MPC_SIGN_CREATED`, `MPC_SIGN_STATUS_CHANGED`, `WEB3_SIGN_CREATED`, `WEB3_SIGN_STATUS_CHANGED`, `ILLEGAL_IP_REQUEST`, `NO_MATCHING_TRANSACTION_POLICY`, `WHITELIST_ADDED`, `WHITELIST_UPDATED`, `WHITELIST_REMOVED`, `GAS_BALANCE_WARNING`, `AML_KYT_ALERT`. `TOKEN_BLACKLIST_ADDRESS_HIT` is **not** supported and cannot be re-pushed — so every event must still be stored durably before acking.
 
 ---
 
@@ -277,7 +273,7 @@ Call `/v1/webhook/resend` periodically to re-request delivery of events that fai
 | AML check | Mandatory before every outbound transfer via ComplianceApiService KYA screening |
 | Address validation | Mandatory before whitelist add or transfer via CoinApiService.checkCoinAddress() |
 | Amounts | String in API, BigDecimal in code; never float/double |
-| Co-Signer callback | Validate customerRefId + amount + address against business system |
+| Co-Signer callback | Use `CoSignerCallbackController` (COSIGNER.md): rules per transactionType (order + coin + address + amount + memo for NORMAL), AML/KYT whitelist, default REJECT |
 | Webhook | HTTPS only; verify signature; idempotent; IP whitelist |
 | Webhook ordering | Terminal state wins; discard late intermediate-state events |
 | Webhook fallback | REST API polling + /v1/transactions/one |

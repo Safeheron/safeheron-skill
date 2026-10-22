@@ -60,59 +60,64 @@ Each new policy requires approval by team admins in the Safeheron App before it 
 
 ## 5. Scenario: API Co-Signer -- Approval Callback Logic
 
-When the API Co-Signer is the approver, it calls your **Approval Callback Service**. Implement rigorous checks:
+When the API Co-Signer is the approver, it calls your **Approval Callback Service**. Start from the handler and `decide()` in [COSIGNER.md](COSIGNER.md) — they already handle signature verification, callback types (incl. `CALLBACK_TEST`), per-`transactionType` business rules and AML/KYT — and add your policy tiers to `decide()`, **before** the AML check (so over-limit transactions are rejected immediately instead of waiting for KYT):
 
 ```typescript
-import express from 'express';
+// Replaces the business-rules + AML steps at the end of decide() in COSIGNER.md (do not keep both copies):
 
-app.post('/cosigner/callback', async (req, res) => {
-  // 1. Verify signature using Co-Signer identity public key -- REJECT if invalid
-  const payload = converter.requestV3convert(req.body);
-  const tx = JSON.parse(payload);
+// Business rules by transactionType (order matching for NORMAL / UTXO_BATCH_TRANSFER, system rules otherwise)
+if (!(await passesBusinessRules(tx))) {
+  return 'REJECT';
+}
 
-  // 2. Verify customerRefId exists in your DB -- REJECT unknown transactions
-  const order = await withdrawalOrderDao.findByCustomerRefId(tx.customerRefId);
-  if (!order) {
-    console.warn(`REJECT: unknown customerRefId ${tx.customerRefId}`);
-    const resp = converter.responseV3convert({ action: 'REJECT', approvalId: tx.approvalId });
-    return res.json(resp);
-  }
+// Policy tier — defense in depth: your Safeheron policy should already route large amounts to human
+// approvers; if one still reaches the Co-Signer, reject it
+if (!isWithinAutoApprovalLimit(tx)) {
+  console.warn(`REJECT: amount ${tx.txAmount} ${tx.coinKey} exceeds auto-approval limit, txKey=${tx.txKey}`);
+  return 'REJECT';
+}
 
-  // 3. Verify amount matches what the user requested
-  // Compare as strings: Safeheron normalizes txAmount (e.g. "0.001"); store
-  // expectedAmount in the same format when you create the withdrawal order.
-  if (tx.txAmount !== order.expectedAmount) {
-    console.warn(`REJECT: amount mismatch for ${tx.customerRefId}`);
-    const resp = converter.responseV3convert({ action: 'REJECT', approvalId: tx.approvalId });
-    return res.json(resp);
-  }
-
-  // 4. Verify destination address matches
-  if (tx.destinationAddress !== order.destinationAddress) {
-    console.warn(`REJECT: destination mismatch for ${tx.customerRefId}`);
-    const resp = converter.responseV3convert({ action: 'REJECT', approvalId: tx.approvalId });
-    return res.json(resp);
-  }
-
-  // 5. Check AML risk
-  for (const aml of tx.amlList || []) {
-    if (aml.riskLevel === 'HIGH') {
-      const resp = converter.responseV3convert({ action: 'REJECT', approvalId: tx.approvalId });
-      return res.json(resp);
-    }
-  }
-
-  // 6. Check amount within auto-approval limit
-  if (Number(tx.txAmount) > AUTO_APPROVAL_LIMIT) {  // use Decimal for production precision
-    const resp = converter.responseV3convert({ action: 'REJECT', approvalId: tx.approvalId });
-    return res.json(resp);
-  }
-
-  // 7. All checks passed -- approve
-  const resp = converter.responseV3convert({ action: 'APPROVE', approvalId: tx.approvalId });
-  res.json(resp);
-});
+// AML / KYT — only LOW / MEDIUM pass; waits (neither APPROVE nor REJECT) while screening is unfinished
+const amlDecision = evaluateAml(approvalId, tx);
+if (amlDecision === 'WAIT') {
+  return ACTION_WAIT;
+}
+return amlDecision === 'PASS' ? 'APPROVE' : 'REJECT';
 ```
+
+```typescript
+// Limits are per coin, in the coin's own unit (decimal strings) — never compare raw amounts of different coins against one number
+const AUTO_APPROVAL_LIMITS: Record<string, string> = {
+  'ETHEREUM_ETH': '10',
+  'USDT(ERC20)_ETHEREUM_USDT': '50000',
+};
+
+function isWithinAutoApprovalLimit(tx: any): boolean {
+  const limit = typeof tx.coinKey === 'string' ? AUTO_APPROVAL_LIMITS[tx.coinKey] : undefined;
+  // normalizeAmount (COSIGNER.md) returns null for missing, negative or malformed amounts — fail closed.
+  // Never use Number(): Number('abc') is NaN and `NaN > limit` is false, which would let it through
+  const amount = normalizeAmount(tx.txAmount);
+  if (limit === undefined || amount === null) {
+    return false;
+  }
+  return compareDecimal(amount, normalizeAmount(limit)!) <= 0;
+}
+
+// Compares two normalized non-negative decimal strings without floating point
+function compareDecimal(a: string, b: string): number {
+  const [aInt, aFrac = ''] = a.split('.');
+  const [bInt, bFrac = ''] = b.split('.');
+  if (aInt.length !== bInt.length) {
+    return aInt.length < bInt.length ? -1 : 1;
+  }
+  const len = Math.max(aFrac.length, bFrac.length);
+  const aDigits = aInt + aFrac.padEnd(len, '0');
+  const bDigits = bInt + bFrac.padEnd(len, '0');
+  return aDigits === bDigits ? 0 : aDigits < bDigits ? -1 : 1;
+}
+```
+
+**The callback service is a critical security control point.** A weak implementation here undermines the entire approval system.
 
 ---
 
@@ -122,7 +127,7 @@ app.post('/cosigner/callback', async (req, res) => {
 |----------------|----------------|
 | API Key sends to an address NOT in the whitelist | Transaction blocked by policy |
 | API Key initiates from a wallet it's not authorized to use as source | Transaction blocked by policy |
-| Withdrawal amount exceeds the per-tx auto-approval threshold | Escalated to Ops Team |
+| Withdrawal amount exceeds the per-tx auto-approval threshold | Routed by policy to the Ops Team for manual review; the Co-Signer callback rejects it if it ever reaches it |
 | 24H cumulative total exceeds limit | Escalated to higher approval tier |
 | Transaction with no matching policy | Blocked; `NO_MATCHING_TRANSACTION_POLICY` webhook fires |
 

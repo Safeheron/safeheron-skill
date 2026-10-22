@@ -74,14 +74,20 @@ for (CoinResponse coin : coins) {
 
 Use before adding to whitelist or sending funds:
 
+> `checkAml` / `amlValid` only checks Safeheron's AML blacklist. For real address risk screening (risk levels incl. `SEVERE`), use **KYA** — see [COMPLIANCE_API.md](COMPLIANCE_API.md). Do not use the deprecated AML Checker (`/v1/tools/aml-checker/*`).
+
 ```java
 CheckCoinAddressRequest req = new CheckCoinAddressRequest();
 req.setCoinKey("ETHEREUM_ETH");
 req.setAddress("0xAbCd...");
+req.setCheckAddressValid(true);   // without this flag the format is not checked
+req.setCheckAml(true);            // without this flag amlValid is always true
+// req.setCheckContract(true);
+// req.setCheckSolanaOwnerAddress(true);  // Solana only
 
 CheckCoinAddressResponse resp = ServiceExecutor.execute(coinApi.checkCoinAddress(req));
 
-// ✅ Correct getters — use exactly these, no others exist
+// Getters: getAddressValid(), getContract(), getAmlValid(), getSolanaOwnerAddress()
 if (!Boolean.TRUE.equals(resp.getAddressValid())) {
     throw new IllegalArgumentException("Invalid address format: " + address);
 }
@@ -107,7 +113,8 @@ if (!Boolean.TRUE.equals(resp.getAmlValid())) {
 |-------|------|-------------|
 | `addressValid` | Boolean |  Valid address format |
 | `contract` | Boolean |  Contract address |
-| `amlValid` | Boolean |  Subject to risk control limitations |
+| `amlValid` | Boolean |  Subject to risk control limitations. True: AML valid address; False: AML blacklisted address |
+| `solanaOwnerAddress` | Boolean |  Solana owner address. True: Solana owner address; False: non-Solana owner address |
 
 ---
 

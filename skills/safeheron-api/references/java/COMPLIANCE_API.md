@@ -8,6 +8,10 @@ Two main integration points:
 1. **KYT** — retrieve AML risk reports for completed transactions (`kytReport`).
 2. **KYA** — proactively screen a blockchain address before transacting (`kyaScreeningCreate` / `kyaScreeningOne` / `kyaScreeningOrderOne`).
 
+> ⚠️ **Deprecated — do not use:** the AML Checker APIs (`/v1/tools/aml-checker/request`, `/v1/tools/aml-checker/retrieves`, i.e. `ToolsApiService.amlCheckerRequest` / `amlCheckerRetrieves`) are scheduled for discontinuation. Always use the KYA APIs above for address screening — they support more networks and multiple providers (Elliptic, Chainalysis, MistTrack). The `checkAml` flag of `checkCoinAddress` only checks Safeheron's AML blacklist and is not a substitute for KYA.
+>
+> **Risk levels** (`riskLevel`, used by KYT, KYA and the Co-Signer callback): `LOW` / `MEDIUM` / `HIGH` / `SEVERE` / `UNKNOWN`. Always handle `SEVERE` — it is the highest level, above `HIGH`.
+
 ---
 
 ## Imports
@@ -27,7 +31,9 @@ import com.safeheron.client.response.KyaSupportedNetworksResponse;
 import com.safeheron.client.utils.ServiceCreator;
 import com.safeheron.client.utils.ServiceExecutor;
 import com.safeheron.client.request.Aml;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Set;
 ```
 
 ## Create API Service
@@ -103,8 +109,8 @@ Initiate an address screening against one or more AML providers in parallel:
 ```java
 KyaScreeningRequest req = new KyaScreeningRequest();
 req.setAddress("0xRecipientAddress");
-req.setChainType("ETH");
-// req.setNetwork("ethereum");  // required when providers includes MistTrack
+req.setChainType("EVM");          // see kyaSupportedNetworks() for valid values
+req.setNetwork("Ethereum");       // required when providers includes MistTrack
 req.setProviders(Arrays.asList("Elliptic", "Chainalysis"));
 
 KyaScreeningCreateResponse resp = ServiceExecutor.execute(complianceApi.kyaScreeningCreate(req));
@@ -237,19 +243,19 @@ for (KyaSupportedNetworksResponse n : networks) {
 
 ---
 
-## AML Lock Behavior
+## failOnAml Behavior (destination AML check)
 
 When `failOnAml=true` (default) in `CreateTransactionRequest`, Safeheron will:
-1. Automatically run AML checks on the destination address.
-2. Block the transaction if the address scores high-risk (`amlLock = "YES"`).
+1. Assess the `destinationAddress` through its AML/KYT provider when the transaction is initiated.
+2. Prohibit the transaction if the destination address presents compliance risks.
 
 To disable AML blocking (not recommended for production):
 ```java
 CreateTransactionRequest req = new CreateTransactionRequest();
-req.setFailOnAml(false);  // disable AML lock — use with caution
+req.setFailOnAml(false);  // disable the failOnAml destination check — use with caution
 ```
 
-The `TransactionsResponse.amlLock` field indicates `"YES"` or `"NO"`.
+Separately, the transaction response field `amlLock` tells whether the **source** address contains AML address(es) (`"YES"` / `"NO"`) — it is not the result of the `failOnAml` destination check.
 
 ---
 
@@ -263,7 +269,7 @@ List<Aml> amlList = tx.getAmlList();
 for (Aml aml : amlList) {
     System.out.println(aml.getProvider() + " risk: " + aml.getRiskLevel());
 }
-System.out.println("AML locked: " + tx.getAmlLock()); // "YES" or "NO"
+System.out.println("Source address contains AML address(es): " + tx.getAmlLock()); // "YES" or "NO"
 ```
 
 ---
@@ -273,14 +279,15 @@ System.out.println("AML locked: " + tx.getAmlLock()); // "YES" or "NO"
 Use KYA screening to check a destination address before initiating any outbound transfer:
 
 ```java
-// Step 1: Create KYA screening
+// Step 1: Create KYA screening (valid chainType / network values: kyaSupportedNetworks())
 KyaScreeningRequest screenReq = new KyaScreeningRequest();
 screenReq.setAddress(destinationAddress);
-screenReq.setChainType("ETH");
+screenReq.setChainType("EVM");
+screenReq.setNetwork("Ethereum");
 screenReq.setProviders(Arrays.asList("Chainalysis"));
 KyaScreeningCreateResponse created = ServiceExecutor.execute(complianceApi.kyaScreeningCreate(screenReq));
 
-// Step 2: Poll until FINISHED
+// Step 2: Poll until FINISHED (bounded)
 KyaScreeningOneRequest pollReq = new KyaScreeningOneRequest();
 pollReq.setScreenId(created.getScreenId());
 KyaScreeningOneResponse result = null;
@@ -290,13 +297,27 @@ for (int i = 0; i < 30; i++) {
     Thread.sleep(2000);
 }
 
-// Step 3: Handle each riskLevel according to your own business logic
-for (KyaScreeningOneResponse.Order order : result.getOrders()) {
-    String riskLevel = order.getRiskLevel();
-    // Decide what to do based on riskLevel (LOW / MEDIUM / HIGH / SEVERE / UNKNOWN).
-    // For example, block HIGH/SEVERE, require manual review for MEDIUM, allow LOW, etc.
-    // Implement the subsequent business logic (block, alert, proceed with transaction, ...) yourself.
+// Step 3: Fail closed — anything that is not an explicit pass blocks the transfer (route to manual review)
+if (result == null || !"FINISHED".equals(result.getStatus())) {
+    throw new SecurityException("KYA screening not finished for " + destinationAddress + ", route to manual review");
 }
+if (result.getOrders() == null || result.getOrders().isEmpty()) {
+    throw new SecurityException("KYA screening returned no provider result for " + destinationAddress);
+}
+// Whitelist: only LOW / MEDIUM pass (adjust per your policy); HIGH, SEVERE, UNKNOWN, a missing level or FAILED are blocked
+Set<String> allowedRiskLevels = Set.of("LOW", "MEDIUM");
+for (KyaScreeningOneResponse.Order order : result.getOrders()) {
+    if ("SKIPPED".equals(order.getStatus())) {
+        continue;   // manually skipped in Web Console
+    }
+    if (!"COMPLETED".equals(order.getStatus())) {
+        throw new SecurityException("KYA screening " + order.getStatus() + " (" + order.getProvider() + "), route to manual review");
+    }
+    if (order.getRiskLevel() == null || !allowedRiskLevels.contains(order.getRiskLevel())) {
+        throw new SecurityException("AML check failed: " + destinationAddress + " is " + order.getRiskLevel() + " risk");
+    }
+}
+// All providers passed — proceed with the transaction
 ```
 
 ---

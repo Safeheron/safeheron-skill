@@ -25,7 +25,7 @@ Wallet Account 1          Wallet Account 2          Wallet Account ...
 |-----------|-----------|---------|
 | `INFLOW` | External -> team wallet | User deposit |
 | `OUTFLOW` | Team wallet -> external | User withdrawal |
-| `INTERNAL_TRANSFER` | Team wallet -> team wallet | Consolidation, gas top-up |
+| `INTERNAL_TRANSFER` | Team wallet -> team wallet (source and destination are both `VAULT_ACCOUNT`) | Consolidation, gas top-up, **a user withdrawing to another user's deposit address on your platform** |
 
 ---
 
@@ -77,27 +77,39 @@ event_type = biz_content.get('eventType')
 if event_type != 'TRANSACTION_STATUS_CHANGED':
     return
 
-tx_type = biz_content.get('transactionType')       # "NORMAL"
-tx_direction = biz_content.get('transactionDirection')  # "INFLOW"
-status = biz_content.get('transactionStatus')
+event_detail = biz_content.get('eventDetail') or {}  # business fields live under eventDetail
+tx_type = event_detail.get('transactionType')       # "NORMAL"
+tx_direction = event_detail.get('transactionDirection')  # "INFLOW"
+status = event_detail.get('transactionStatus')
 
-if tx_type == 'NORMAL' and tx_direction == 'INFLOW':
-    handle_deposit_status_change(biz_content)
+if tx_type == 'NORMAL' and tx_direction in ('INFLOW', 'INTERNAL_TRANSFER'):
+    # INTERNAL_TRANSFER: e.g. user A withdraws to user B's deposit address on your platform --
+    # settle A's withdrawal AND credit B; ignore your own consolidation / gas top-up transfers
+    handle_deposit_status_change(event_detail)
+
+
+def deposit_outputs(event_detail):
+    """(address, amount) pairs credited by this transaction. UTXO coins (BTC, LTC, DOGE, ...) put them in
+    destinationAddressList; destinationAddress is not populated for UTXO coins."""
+    outputs = event_detail.get('destinationAddressList') or []
+    if outputs:
+        return [(o.get('address'), o.get('amount')) for o in outputs]
+    return [(event_detail.get('destinationAddress'), event_detail.get('txAmount'))]
 ```
 
 **Status progression for inflow transactions:**
 
 | Status | Meaning | Action |
 |--------|---------|--------|
-| `BROADCASTING` | On-chain, 0 confirmations | Optionally show "pending" to user |
+| `BROADCASTING` | On-chain, 0 confirmations (incoming: **Bitcoin only** — other chains skip this state) | Optionally show "pending" to user |
 | `CONFIRMING` | >=1 confirmation | Optionally show confirmation count |
 | `COMPLETED` | >=N confirmations (Safeheron default) | **Credit user account** |
 | `FAILED` | Failed on-chain | No credit |
 
 **Critical rules:**
-- Return HTTP 200 **immediately** before any processing
+- Verify the signature and **durably store** the event (DB inbox / durable MQ), then ack `{"code":"200","message":"SUCCESS"}` -- do the business processing asynchronously from that store (see [WEBHOOK.md](WEBHOOK.md))
 - **Never roll back status** -- if DB already has `COMPLETED`, ignore a late `CONFIRMING` event
-- Implement **idempotency by `txKey`**
+- Implement **idempotency by `txKey`** and commit it in the **same DB transaction** as the credit -- never commit a dedup row first and credit afterwards
 
 **Anti-dust attack:** Configure a minimum deposit amount and ignore events below that threshold.
 
@@ -216,9 +228,10 @@ except Exception as e:
 
 ```python
 # In webhook handler for TRANSACTION_STATUS_CHANGED
-tx_key = biz_content.get('txKey')
-customer_ref_id = biz_content.get('customerRefId')
-new_status = biz_content.get('transactionStatus')
+event_detail = biz_content.get('eventDetail') or {}  # business fields live under eventDetail
+tx_key = event_detail.get('txKey')
+customer_ref_id = event_detail.get('customerRefId')
+new_status = event_detail.get('transactionStatus')
 
 order = find_order_by_tx_key_or_ref_id(tx_key, customer_ref_id)
 if order is None:
@@ -226,6 +239,11 @@ if order is None:
 
 # Never roll back status
 if is_terminal_status(order['status']):
+    return
+
+# Speed-up: the original tx ends FAILED while its replacement may still complete — keep the order open and let the replacement decide
+# (check BEFORE moving the order to a terminal state, otherwise the replacement's COMPLETED event is discarded)
+if new_status in ('FAILED', 'REJECTED', 'CANCELLED') and has_active_replacement(order, tx_key):
     return
 
 update_order_status(order['id'], new_status)
@@ -260,14 +278,16 @@ from safeheron_api_sdk_python.api.transaction_api import RecreateTransactionRequ
 
 param = RecreateTransactionRequest()
 param.txKey = stuck_tx_key
+param.txHash = stuck_tx_hash   # on-chain hash of the stuck transaction
+param.coinKey = coin_key
 param.txFeeLevel = "HIGH"
 
 resp = transaction_api.recreate_transactions(param)
 new_tx_key = resp['txKey']
 ```
 
-Chains that support speed-up: all EVM chains, BTC, BCH, DASH, LTC, DOGE, FIL, Aptos, CFX.
-Chains that do NOT support speed-up: NEAR, SUI, TRON, SOL, TON.
+Chains that support speed-up: EVM chains (ETH, ETC, BSC, MATIC, etc.), Bitcoin and Dogecoin (RBF and CPFP) and other UTXO chains supporting CPFP, Filecoin, Aptos, XRP Ledger.
+Chains that do NOT support speed-up (not listed in the published docs as supported): NEAR, SUI, TRON, SOL, TON.
 
 ---
 
@@ -275,13 +295,12 @@ Chains that do NOT support speed-up: NEAR, SUI, TRON, SOL, TON.
 
 ### At withdrawal time:
 - Run destination address through your internal risk engine
-- Optionally use KYA address screening via `ComplianceApi` -- see [COMPLIANCE_API.md](COMPLIANCE_API.md)
+- Screen the destination address with **KYA** (`ComplianceApi.create_kya_screening` -> poll `kya_screening_one`) -- see [COMPLIANCE_API.md](COMPLIANCE_API.md). Do **not** use the deprecated AML Checker (`/v1/tools/aml-checker/*`, `ToolsApi.aml_checker_request` / `aml_checker_retrieves`), and `checkAml` in `check_coin_address` is not a substitute for KYA
+- Reject withdrawals to `HIGH` / `SEVERE` (and, by default, `UNKNOWN`) risk addresses before they reach Safeheron
 
 ### In the Approval Callback Service (Co-Signer):
 
-```python
-# Check AML risk in callback
-for aml in customer_content.get('amlList', []):
-    if aml.get('riskLevel', '').upper() == 'HIGH':
-        return "REJECT"
-```
+Use `evaluate_aml(approval_id, tx)` in the Flask callback service ([COSIGNER.md](COSIGNER.md#aml--kyt-handling-in-the-callback)):
+- Only `riskLevel` `LOW` / `MEDIUM` pass by default -- `HIGH`, `SEVERE`, `UNKNOWN` and unexpected values are rejected
+- While `amlScreeningTriggeredState = IN_PROGRESS` or any `status = PENDING`, return neither APPROVE nor REJECT (Co-Signer retries every 5s); fall back to reject / manual review ~5 min after the first callback for that approval
+- `status = FAILED`, a missing / unknown status, or `TRIGGERED` with an empty `amlList` -> reject and alert

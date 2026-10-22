@@ -130,8 +130,11 @@ This is the exact pattern from the official SDK demo (`mpcsign_test.go`):
 ```go
 import (
     "context"
+    "fmt"
+    "log"
     "math/big"
 
+    "github.com/Safeheron/safeheron-api-sdk-go/safeheron/api"
     "github.com/ethereum/go-ethereum/common"
     "github.com/ethereum/go-ethereum/common/hexutil"
     "github.com/ethereum/go-ethereum/core/types"
@@ -140,20 +143,21 @@ import (
     "golang.org/x/crypto/sha3"
 )
 
-// 1. Build ERC-20 transfer calldata
+// 1. Build ERC-20 transfer calldata (toAddress: recipient hex string; tokenAmount: *big.Int in the token's smallest unit)
+to := common.HexToAddress(toAddress)
 fnHash := sha3.NewLegacyKeccak256()
 fnHash.Write([]byte("transfer(address,uint256)"))
 methodId := fnHash.Sum(nil)[:4]
 var data []byte
 data = append(data, methodId...)
-data = append(data, common.LeftPadBytes(common.HexToAddress(toAddress).Bytes(), 32)...)
+data = append(data, common.LeftPadBytes(to.Bytes(), 32)...)
 data = append(data, common.LeftPadBytes(tokenAmount.Bytes(), 32)...)
 
 // 2. Build EIP-1559 raw transaction
 tx := types.NewTx(&types.DynamicFeeTx{
     ChainID:   chainID,
     Nonce:     nonce,
-    To:        &toAddress,
+    To:        &to,
     Value:     big.NewInt(0),
     Data:      data,
     Gas:       gasLimit,
@@ -187,6 +191,10 @@ if err := mpcSignApi.CreateMpcSign(createReq, &createResp); err != nil {
 sig := retrieveSig(mpcSignApi, customerRefId)
 
 // 6. Assemble signed transaction and broadcast
+client, err := ethclient.Dial(rpcURL) // your Ethereum JSON-RPC endpoint
+if err != nil {
+    log.Fatal(err)
+}
 sigByte, _ := hexutil.Decode("0x" + sig)
 signedTx, err := tx.WithSignature(signer, sigByte)
 if err != nil {

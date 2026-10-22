@@ -69,16 +69,17 @@ String txKey = resp.getTxKey();
 | `destinationAddress` | Cond. | String | Required when `destinationAccountType=ONE_TIME_ADDRESS` |
 | `destinationAccountKey` | Cond. | String | Required when type is `VAULT_ACCOUNT` (accountKey) or `WHITELISTING_ACCOUNT` (whitelistKey) |
 | `txFeeLevel` | No | String | `LOW` / `MIDDLE` / `HIGH` — Choose between transaction fees. If the transaction fee rate is preset, it will take priority |
-| `feeRateDto` | No | Object | Transaction fee rate, either `TxFeeLevel` or `FeeRateDto` |
+| `feeRateDto` | No | Object | Transaction fee rate, either `TxFeeLevel` or `FeeRateDto`. `feeRate` unit: fee per byte for UTXO, gas price for EVM chains, fee limit for TRON (optional), gas price for SUI and drops for XRPL (the XRPL `drops` unit is documented for Create a Transaction **V3**) |
 | `maxTxFeeRate` | No | String | Max acceptable fee rate |
 | `note` | No | String | Transaction note (max 180 chars) |
 | `customerExt1` | No | String | Custom field 1 (max 255 chars) |
 | `customerExt2` | No | String | Custom field 2 (max 255 chars) |
 | `treatAsGrossAmount` | No | Boolean | If true, fee is deducted from `txAmount` |
-| `memo` | No | String | Memo/tag (for TON, XRP, Stellar — max 100 chars) |
+| `memo` | No | String | Memo/tag of the destination address — only for **TON** and **XRP Ledger** (max 100 chars; for XRPL it must be a numeric string in 0–4294967295) |
 | `failOnAml` | No | Boolean | Default true — block high-risk addresses via AML |
 | `failOnContract` | No | Boolean | Block contract addresses as destination |
 | `nonce` | No | Long | Custom nonce for EVM chains |
+| `sequenceNumber` | No | Long | Customizable sequence number on Aptos and XRP Ledger, similar to the nonce in the EVM |
 | `isRbf` | No | Boolean | Enable Replace-by-Fee for Bitcoin |
 
 > **Fee priority:** `txFeeLevel` takes precedence over `feeRateDto`. If using `feeRateDto`, you must provide at least `gasLimit` AND `feeRate` — providing only `gasLimit` will cause the transaction to fail.
@@ -118,7 +119,7 @@ System.out.println("TxHash: " + resp.getTxHash());
 | `customerRefId` | String | Your reference ID |
 | `customerExt1` | String | Custom field 1 |
 | `customerExt2` | String | Custom field 2 |
-| `amlLock` | String | `YES` / `NO` — AML blocked |
+| `amlLock` | String | Whether the source address contains AML address(es): `YES` / `NO` |
 | `amlList` | List\<Aml\> | AML assessment results |
 | `blockHeight` | Long | Block height at confirmation |
 | `nonce` | String | Transaction nonce |
@@ -136,7 +137,9 @@ ListTransactionsV2Request req = new ListTransactionsV2Request();
 req.setLimit(20L);
 req.setTransactionStatus("COMPLETED");  // optional filter
 req.setCoinKey("ETHEREUM_ETH");       // optional filter
-// req.setCreateTimeMin(startMs);     // optional timestamp filter
+// createTimeMin defaults to createTimeMax − 24h (createTimeMax defaults to now):
+// without it you only get transactions created in the last 24 hours
+// req.setCreateTimeMin(startMs);
 // req.setCreateTimeMax(endMs);
 
 List<TransactionsResponse> txList = ServiceExecutor.execute(transactionApi.listTransactionsV2(req));
@@ -164,8 +167,8 @@ Own fields:
 | `destinationAccountKey` | String | Destination account key |
 | `destinationAccountType` | String | Destination account type |
 | `accountKey` | String | Query all txns under this wallet (VAULT_ACCOUNT only; overrides source/dest filters) |
-| `createTimeMin` | Long | Start time, UNIX timestamp (ms) |
-| `createTimeMax` | Long | End time, UNIX timestamp (ms) |
+| `createTimeMin` | Long | Start time, UNIX timestamp (ms). Defaults to `createTimeMax` minus 24 hours |
+| `createTimeMax` | Long | End time, UNIX timestamp (ms). Defaults to the current time |
 | `txAmountMin` | String | Min transaction amount |
 | `txAmountMax` | String | Max transaction amount |
 | `coinKey` | String | Coin key, multiple separated by commas |
@@ -216,7 +219,7 @@ System.out.println("High:   " + resp.getHighFeeRate().getFeeRate() + " (fee: " +
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `feeRate` | String | Fee rate (gas price or sat/vbyte) |
+| `feeRate` | String | Fee rate: UTXO fee per byte, EVM gas price, TRON fee limit, SUI gas price and XRPL drops |
 | `fee` | String | Estimated total fee amount |
 | `gasLimit` | String | Gas limit (EVM chains only) |
 
@@ -231,6 +234,8 @@ System.out.println("High:   " + resp.getHighFeeRate().getFeeRate() + " (fee: " +
 | `destinationAddress` | String | Destination address (optional for TRON/FIL; for EVM returns on-chain gas limit) |
 | `destinationAddressList` | `List<DestinationAddress>` | Destination address list |
 | `value` | String | Transfer amount (improves accuracy for EVM, UTXO, SUI) |
+
+> The API also accepts `memo` (TON / XRP Ledger; for XRPL a numeric string in 0–4294967295) for fee estimation, but `TransactionsFeeRateRequest` in SDK 1.0.15 does not have this field yet.
 
 > **BTC fee** = feeRate × bytesSize. **ETH fee** = feeRate × gasLimit.
 > **TRON fee**: `sourceAddress` must be provided to check on-chain staking/energy.
@@ -264,8 +269,10 @@ Replaces a stuck transaction with a higher fee version:
 
 ```java
 RecreateTransactionRequest req = new RecreateTransactionRequest();
-req.setTxKey(originalTxKey);
-req.setTxFeeLevel("HIGH");  // use higher fee
+req.setTxKey(originalTxKey);     // required
+req.setTxHash(originalTxHash);   // required — on-chain hash of the original transaction
+req.setCoinKey(coinKey);         // required
+req.setTxFeeLevel("HIGH");       // use higher fee (or set feeRateDto)
 
 TxKeyResult resp = ServiceExecutor.execute(transactionApi.recreateTransactions(req));
 String newTxKey = resp.getTxKey();
@@ -273,13 +280,15 @@ String newTxKey = resp.getTxKey();
 
 **RecreateTransactionRequest Fields:**
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `txKey` | String | Original transaction key to speed up |
-| `txHash` | String | Original transaction hash |
-| `coinKey` | String | Coin key |
-| `txFeeLevel` | String | Fee level: `LOW` / `MIDDLE` / `HIGH` |
-| `feeRateDto` | FeeRateDto | Custom fee rate (either `txFeeLevel` or `feeRateDto`) |
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `txKey` | Yes | String | Original transaction key to speed up |
+| `txHash` | Yes | String | Original transaction hash |
+| `coinKey` | Yes | String | Coin key |
+| `txFeeLevel` | No | String | Fee level: `LOW` / `MIDDLE` / `HIGH` |
+| `feeRateDto` | No | FeeRateDto | Custom fee rate (either `txFeeLevel` or `feeRateDto`) |
+
+> Provide at least one of `txFeeLevel` / `feeRateDto` — the service rejects a speed-up request with neither (service-side validation).
 
 > The original transaction and speed-up are independent. The speed-up will invalidate the original (original → FAILED). The speed-up transaction can be found via `speedUpHistory` in the original transaction, or `replacedTxKey` in the new one.
 
@@ -303,12 +312,12 @@ ApprovalDetailTransactionsResponse resp = ServiceExecutor.execute(
 |--------|-------------|
 | `SUBMITTED` | Received by Safeheron |
 | `SIGNING` | MPC signing in progress — entered after approval by team members or API Co-Signer |
-| `BROADCASTING` | Submitted to blockchain |
+| `BROADCASTING` | Being broadcast to the blockchain network. For incoming transactions, only Bitcoin supports this state (zero confirmation) |
 | `CONFIRMING` | On-chain, awaiting block confirmations |
 | `COMPLETED` | Confirmed on-chain — assets successfully transferred |
 | `CANCELLED` | Final state — transaction cancelled by team member or system |
 | `FAILED` | Transaction failed |
-| `REJECTED` | Rejected by approver |
+| `REJECTED` | Rejected by a team member's approval, or rejected due to a Connect recipient's approval |
 
 ### Status Flow
 
@@ -324,6 +333,74 @@ SUBMITTED
     → REJECTED (denied by approver)
     → CANCELLED (cancelled by team member)
 ```
+
+### Transaction Substatus (`transactionSubStatus`)
+
+`transactionSubStatus` gives the detailed sub-state / failure reason of a transaction (e.g. `CONFIRMED`, `PENDING_BLOCKCHAIN_CONFIRMATIONS`, or why a `FAILED` transaction failed).
+
+| Substatus | Description |
+|-----------|-------------|
+| `CONFIRMED` | Confirmed |
+| `UN_KNOW_ERROR` | Unexpected error |
+| `REVIEW_REJECTED` | Rejected |
+| `TRADING_STRATEGY_BLOCKING` | Transaction policy has been blocked |
+| `MATCHING_RULE_NO_AUDITOR` | Matched with the policy, but the editor does not possess the approval role |
+| `TX_INFO_ERROR` | Transaction failed |
+| `NONCE_TOO_LOW` | Nonce too low |
+| `INTRINSIC_GAS_TOO_LOW` | Gas limit too low, cannot perform transaction |
+| `INSUFFICIENT_FUNDS` | Insufficient amount for withdrawal |
+| `AMOUNT_TOO_SMALL` | The withdrawal amount is below the minimum limit |
+| `TRANSACTION_UNDERPRICED` | Transaction fee too low, transaction is rejected by node |
+| `MISSING_INPUTS` | Invalid input |
+| `INVALID_SIGNATURE` | Invalid transaction signature |
+| `INTERNAL_ERROR` | An internal error occurred while processing the transaction |
+| `TIMEOUT` | The transaction request timed out |
+| `PENDING_BLOCKCHAIN_CONFIRMATIONS` | Pending blockchain confirmation |
+| `TAPOS_ERROR` | Tapos check error |
+| `NODE_SERVER_BUSY` | Node service is busy |
+| `DUP_TRANSACTION_ERROR` | The transaction is on-chain, and a duplicate submission has been made |
+| `TRANSACTION_EXPIRATION_ERROR` | Transaction expired |
+| `TRANSACTION_EXECUTION_FAILED` | Transaction execution failed |
+| `BANDWITH_ERROR` | For Tron transactions: Insufficient bandwidth/energy or TRX. You can either increase the transaction fee or have other accounts delegate resources to this account before initiating the transaction |
+| `ACCOUNT_DOES_NOT_EXIST` | Account doesn't exist |
+| `NO_MATCHING_RULE_FOUND` | Transaction failed, configure transaction policy first |
+| `WHITELIST_ADDRESS_STATUS_ILLEGAL` | The whitelisted address is not approved |
+| `AML_SCREENING_REJECTED` | Rejected by AML check |
+| `CONTRACT_VALIDATE_ERROR` | Transaction verification error |
+| `THE_DEAL_WAS_ABANDONED` | Transaction abandoned |
+| `MANUAL_TX_FAIL` | Manual processing |
+| `CANCELLED_BY_USER` | User cancelled transaction |
+| `RISK_CHECK_ILLEGAL` | Exceptions detected by risk control |
+| `WALLET_NOT_ALLOWED` | The wallet doesn't support current operation |
+| `USER_NO_PERMISSION` | User doesn't have permission |
+| `EXCHANGE_EMAIL_CONFIRMING` | Pending email confirmation |
+| `EXCHANGE_UN_KNOW_ERROR` | Unexpected error |
+| `EXCHANGE_INVALID_INFO` | Invalid API key, IP, or operational permission |
+| `EXCHANGE_AMOUNT_OVER_LIMIT` | The transfer amount exceeds the maximum |
+| `EXCHANGE_BALANCE_LACK` | Insufficient balance |
+| `RESET_AUTO_CANCEL` | Automatic cancellation |
+| `REVIEW_OTHERS_REJECTED` | Rejected by the counterparty |
+| `TON_BOUNCE_TRANSACTION` | The transaction is bounced |
+| `TON_SEQUENCE_INVALID` | Invalid sequence |
+| `UTXO_DUST` | Dust Transaction |
+| `MPC_TIMEOUT` | The MPC signature timed out |
+| `SOL_ERROR_PROCESSING_INSTRUCTION` | Transaction execution failed |
+| `DEST_ADDRESS_TOKEN_BLACKLISTED` | The destination address has been frozen by the token issuer |
+| `SOURCE_ADDRESS_TOKEN_BLACKLISTED` | The source address has been frozen by the token issuer |
+
+### Transaction Subtype (`transactionType`)
+
+| `transactionType` | Description |
+|-------------------|-------------|
+| `NORMAL` | Normal transaction |
+| `UTXO_COLLECTION` | UTXO-sweeping transaction |
+| `ABNORMAL` | Transfers to external destinations (not in the Safeheron platform) or transactions signed by the original private key recovered by key shards |
+| `AUTO_SWEEP` | Auto-sweeping transaction |
+| `AUTO_FUEL` | Auto-fueling transaction |
+| `UTXO_BATCH_TRANSFER` | UTXO multi-address transfer |
+| `BOUNCED_TRANSFER` | TON's bounced transaction |
+| `GAS_SERVICE_DEPOSIT` | Gas Service Deposit |
+| `GAS_SERVICE_FUEL` | Gas Service Fuel |
 
 ### Transaction Direction (source/destination type)
 
@@ -355,11 +432,14 @@ SUBMITTED
 
 ### Speed-Up (Transaction Acceleration) Support
 
+Supported blockchains (per Safeheron API docs):
+
 | Category | Supported Chains |
 |----------|-----------------|
-| UTXO chains | BTC, BCH, DASH, LTC, DOGE |
-| Non-UTXO chains | All EVM chains, FIL, Aptos, CFX |
-| NOT supported | NEAR, SUI, TRON, SOL, TON |
+| EVM chains | ETH, ETC, BSC, MATIC, etc. |
+| UTXO chains | Bitcoin, Dogecoin (RBF and CPFP), and other UTXO-based chains supporting CPFP |
+| Others | FileCoin, Aptos, XRP Ledger |
+| NOT supported | Any chain not listed above (e.g. NEAR, SUI, TRON, SOL, TON — not listed in the published docs as supported) |
 
 ### Chain-Specific Notes
 

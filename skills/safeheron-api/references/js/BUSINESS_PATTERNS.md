@@ -77,12 +77,13 @@ Subscribe to `TRANSACTION_STATUS_CHANGED`. Filter for deposit (inflow) transacti
 function handleWebhookEvent(event: any) {
   if (event.eventType !== 'TRANSACTION_STATUS_CHANGED') return;
 
-  const txType = event.transactionType;       // "NORMAL"
-  const txDirection = event.transactionDirection;  // "INFLOW"
-  const status = event.transactionStatus;
+  // Business fields are under eventDetail (event = {eventType, eventDetail})
+  const detail = event.eventDetail;
+  const txType = detail.transactionType;            // "NORMAL"
+  const txDirection = detail.transactionDirection;  // "INFLOW"
 
   if (txType === 'NORMAL' && txDirection === 'INFLOW') {
-    handleDepositStatusChange(event);
+    handleDepositStatusChange(detail);
   }
 }
 ```
@@ -91,13 +92,15 @@ function handleWebhookEvent(event: any) {
 
 | Status | Meaning | Action |
 |--------|---------|--------|
-| `BROADCASTING` | On-chain, 0 confirmations | Optionally show "pending" to user |
+| `BROADCASTING` | On-chain, 0 confirmations (incoming: Bitcoin network only) | Optionally show "pending" to user |
 | `CONFIRMING` | >=1 confirmation | Optionally show confirmation count |
 | `COMPLETED` | >=N confirmations (Safeheron default) | **Credit user account** |
 | `FAILED` | Failed on-chain | No credit |
 
 **Critical rules for webhook handlers:**
-- Return HTTP 200 **immediately** before any processing -- put work on an async queue
+- Verify the signature and **durably** store the event (DB inbox / durable MQ — not an in-memory queue), then ack `{"code":"200","message":"SUCCESS"}`; process asynchronously, committing the idempotency marker and the credit in one DB transaction -- see [WEBHOOK.md](WEBHOOK.md)
+- **UTXO coins (BTC, LTC, DOGE, ...):** match the deposit by `destinationAddressList[]` (`address` / `amount`) — `destinationAddress` may be empty; credit each list entry that belongs to one of your users
+- **`INTERNAL_TRANSFER`:** a user withdrawing to another user's deposit address inside your own team arrives with `transactionDirection = INTERNAL_TRANSFER`, not `INFLOW` — handle it as the sender's withdrawal completion **and** the receiver's deposit, or it will never be credited
 - **Never roll back status** -- if DB already has `COMPLETED`, ignore a late `CONFIRMING` event
 - `BROADCASTING` and `CONFIRMING` may be skipped -- handle a direct jump to `COMPLETED`
 - Implement **idempotency by `txKey`** -- Safeheron may deliver the same event more than once
@@ -112,17 +115,27 @@ import { TransactionApi } from '@safeheron/api-sdk';
 const transactionApi = new TransactionApi(config);
 
 // Run every few minutes as a background job
+// createTimeMin is required here: without it only the last 24 hours are returned
 async function pollTransactions(lastPolledTimestampMs: number) {
-  const txList = await transactionApi.listTransactionsV2({
-    limit: 50,
-    createTimeMin: lastPolledTimestampMs,
-    transactionStatus: 'COMPLETED',
-  });
+  const PAGE_SIZE = 500;
+  let fromId: string | undefined;
+  while (true) {
+    const txList = await transactionApi.listTransactionsV2({
+      limit: PAGE_SIZE,
+      direct: 'NEXT',
+      fromId,
+      createTimeMin: lastPolledTimestampMs,
+      transactionStatus: 'COMPLETED',
+    });
 
-  for (const tx of txList) {
-    if (tx.transactionDirection === 'INFLOW' && tx.transactionStatus === 'COMPLETED') {
-      await creditUserIfNotAlready(tx.txKey, tx);
+    for (const tx of txList) {
+      if ((tx.transactionDirection === 'INFLOW' || tx.transactionDirection === 'INTERNAL_TRANSFER')
+          && tx.transactionStatus === 'COMPLETED') {
+        await creditUserIfNotAlready(tx.txKey, tx);  // idempotent by txKey; skips non-deposit internal transfers
+      }
     }
+    if (txList.length < PAGE_SIZE) return;
+    fromId = txList[txList.length - 1].txKey;
   }
 }
 ```
@@ -218,6 +231,7 @@ try {
 ### Withdrawal status sync via Webhook:
 
 ```typescript
+// `event` is the eventDetail of a TRANSACTION_* event (OUTFLOW, or INTERNAL_TRANSFER to an in-team address)
 function handleWithdrawalWebhook(event: any) {
   const { txKey, customerRefId, transactionStatus: newStatus } = event;
 
@@ -226,6 +240,10 @@ function handleWithdrawalWebhook(event: any) {
 
   // Never roll back status
   if (isTerminalStatus(order.status)) return;
+
+  // Speed-up: the original tx ends FAILED while its replacement may still complete — keep the order open and let the replacement decide
+  // (check BEFORE moving the order to a terminal state, otherwise the replacement's COMPLETED event is discarded)
+  if (['FAILED', 'REJECTED', 'CANCELLED'].includes(newStatus) && withdrawalOrderDao.hasActiveReplacement(order, txKey)) return;
 
   order.status = newStatus;
   withdrawalOrderDao.save(order);
@@ -265,6 +283,8 @@ See [POLICY_STRATEGY.md](POLICY_STRATEGY.md) for the complete configuration refe
 ```typescript
 const resp = await transactionApi.recreateTransactions({
   txKey: stuckTxKey,
+  txHash: stuckTxHash,   // required: hash of the stuck transaction
+  coinKey: coinKey,      // required
   txFeeLevel: 'HIGH',
 });
 
@@ -275,8 +295,8 @@ const newTxKey = resp.txKey;
 
 **Important:** A user withdrawal order may end up linked to multiple Safeheron `txKey` values (original + one or more speed-ups). Your DB schema must support this 1:many relationship.
 
-Chains that support speed-up: all EVM chains, BTC, BCH, DASH, LTC, DOGE, FIL, Aptos, CFX.
-Chains that do NOT support speed-up: NEAR, SUI, TRON, SOL, TON.
+Chains that support speed-up: EVM chains (e.g. ETH, ETC, BSC, MATIC), Bitcoin and Dogecoin (RBF and CPFP) and other UTXO-based chains supporting CPFP, Filecoin, Aptos, XRP Ledger.
+Chains that do NOT support speed-up (not listed in the published docs as supported): NEAR, SUI, TRON, SOL, TON.
 
 ---
 
@@ -284,22 +304,16 @@ Chains that do NOT support speed-up: NEAR, SUI, TRON, SOL, TON.
 
 ### At withdrawal time (before submitting to Safeheron):
 - Run destination address through your internal risk engine
-- Optionally use KYA address screening via `ComplianceApi` -- see [COMPLIANCE_API.md](COMPLIANCE_API.md)
-- Reject withdrawals to high-risk or blacklisted addresses before they reach Safeheron
+- Screen the destination address with **KYA** (`complianceApi.createKyaScreening` -> poll `kyaScreeningOne`) -- see [COMPLIANCE_API.md](COMPLIANCE_API.md). Do **not** use the deprecated AML Checker (`/v1/tools/aml-checker/*`, `toolsApi.amlCheckerRequest` / `amlCheckerRetrieves`), and `checkAml` in `checkCoinAddress` is not a substitute for KYA
+- Reject withdrawals to `HIGH` / `SEVERE` (and, by default, `UNKNOWN`) risk addresses before they reach Safeheron
 
 ### Via Safeheron's built-in AML:
 - `failOnAml: true` (default) -- Safeheron blocks the transaction if destination is flagged
-- `amlLock` field in webhook/transaction response indicates whether AML blocked a deposit
+- `amlLock` field in webhook/transaction response indicates whether the **source** address contains AML address(es) — useful when deciding whether to credit a deposit
 
 ### In the Approval Callback Service (Co-Signer):
 
-```typescript
-function evaluateTransaction(payload: any): string {
-  for (const aml of payload.amlList || []) {
-    if (aml.riskLevel === 'HIGH') {
-      return 'REJECT';
-    }
-  }
-  return 'APPROVE';
-}
-```
+Use `evaluateAml(approvalId, tx)` in `decide()` ([COSIGNER.md](COSIGNER.md#aml--kyt-handling-in-the-callback)):
+- Only `riskLevel` `LOW` / `MEDIUM` pass by default — `HIGH`, `SEVERE`, `UNKNOWN` and unexpected values are rejected
+- While `amlScreeningTriggeredState = IN_PROGRESS` or any `status = PENDING`, return neither APPROVE nor REJECT (Co-Signer retries every 5s); fall back to reject / manual review ~5 min after the first callback for that approval
+- `status = FAILED`, a missing / unknown status, or `TRIGGERED` with an empty `amlList` -> reject and alert

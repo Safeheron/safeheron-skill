@@ -37,10 +37,10 @@ List<CreateAccountResponse.CoinAddress> coins = resp.getCoinAddressList();
 
 | Field | Required | Type | Description |
 |-------|----------|------|-------------|
-| `accountName` | Yes | String | Wallet display name |
+| `accountName` | No | String | Account name, 50 characters max |
 | `customerRefId` | No | String | Merchant unique business ID (max 100 chars). Duplicate submissions with the same ID return the same wallet |
 | `hiddenOnUI` | No | Boolean | If true, wallet is hidden in Web Console / App |
-| `autoFuel` | No | Boolean | If true, Gas Station auto-tops up gas when a transaction is initiated. Default: false |
+| `autoFuel` | No | Boolean | Auto-refuel. If set to true, the Gas Service will automatically supplement the Gas fee for the wallet when a transaction is initiated. The default value is false |
 | `accountTag` | No | String | Tag applied at creation. Values: `DEPOSIT`, `NONE`. Required for Auto-Sweep |
 | `coinKeyList` | No | List\<String\> | Coin keys to add at creation (max 20) |
 
@@ -106,7 +106,7 @@ for (AccountResponse acct : accounts) {
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `signAlg` | String | Signature algorithm (e.g. `ECDSA`) |
+| `signAlg` | String | Signature algorithm: `secp256k1` or `ed25519` |
 | `pubKey` | String | Public key value |
 
 ---
@@ -141,6 +141,24 @@ ServiceExecutor.execute(accountApi.batchUpdateAccountTag(req));
 | `NONE` | Remove DEPOSIT label |
 
 > Cancelling `DEPOSIT` label: set `accountTag = "NONE"`. Can be re-applied later.
+
+---
+
+## Batch Set Auto-Fuel
+
+Set `autoFuel` for up to 100 wallet accounts. `true`: the [Gas Service](GAS_API.md) automatically supplements the transaction fee (Gas) for the wallet when a transaction is initiated; `false`: it no longer does.
+
+```java
+BatchUpdateAccountFuelRequest req = new BatchUpdateAccountFuelRequest();
+req.setAccountKeyList(Arrays.asList("your-account-key"));  // required, max 100
+req.setAutoFuel(true);                                     // required
+ResultResponse resp = ServiceExecutor.execute(accountApi.batchUpdateAccountAutofuel(req));
+```
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `accountKeyList` | Yes | List\<String\> | Account keys, max 100 |
+| `autoFuel` | Yes | Boolean | Enable / disable automatic Gas supplementation |
 
 ---
 
@@ -246,6 +264,8 @@ for (AccountCoinResponse coin : coins) {
 | List accounts | `ListAccountRequest` | `PageResult<AccountResponse>` |
 | Get one account | `OneAccountRequest` | `AccountResponse` |
 | Change display in Console/App | `UpdateAccountShowStateRequest` | *(void / ResultResponse)* |
+| Batch label (DEPOSIT / NONE) | `BatchUpdateAccountTagRequest` | `ResultResponse` |
+| Batch set auto-fuel | `BatchUpdateAccountFuelRequest` | `ResultResponse` |
 | Add coin V2 | `CreateAccountCoinV2Request` | `CreateAccountCoinV2Response` |
 | Add coin V1 | `CreateAccountCoinRequest` | `List<CreateAccountCoinResponse>` |
 | List coins | `ListAccountCoinRequest` | `List<AccountCoinResponse>` |
