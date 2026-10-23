@@ -27,7 +27,9 @@ From the team's perspective, every transaction is one of three directions:
 |-----------|-----------|---------|
 | `INFLOW` | External -> team wallet | User deposit |
 | `OUTFLOW` | Team wallet -> external | User withdrawal |
-| `INTERNAL_TRANSFER` | Team wallet -> team wallet | Consolidation, gas top-up |
+| `INTERNAL_TRANSFER` | Team wallet -> team wallet | Consolidation (`AUTO_SWEEP` / `UTXO_COLLECTION`), gas top-up (`AUTO_FUEL`), hot → cold, or a user withdrawing to another user's deposit address on your platform |
+
+> Direction alone never decides a credit: Auto Sweep's gas top-up (`AUTO_FUEL`) lands on a user's deposit address as an `INTERNAL_TRANSFER`. Always classify with `transactionType` too — see `classifyTransaction` in section 3.
 
 ---
 
@@ -67,23 +69,54 @@ const depositAddress = res.coinAddressList[0].addressList[0].address;
 ## 3. Deposit Detection (User Credit)
 
 Use **Webhook as primary + REST API polling as fallback**. Never rely on only one.
+Both paths must decide with the **same** function, so a transaction that one path ignores is never credited by the other:
+
+```typescript
+type TxClass = 'CREDIT_DEPOSIT' | 'SETTLE_WITHDRAWAL_AND_CREDIT_RECEIVER' | 'IGNORE';
+
+// Shared by the webhook handler and the polling job — never decide crediting from transactionDirection alone.
+// async: the order lookup is a DB call — without `await`, a pending Promise is always truthy and every
+// NORMAL internal transfer would be treated as a matched withdrawal
+async function classifyTransaction(tx: { transactionType?: string; transactionDirection?: string; txKey: string; customerRefId?: string }): Promise<TxClass> {
+  // AUTO_FUEL, AUTO_SWEEP, UTXO_COLLECTION, GAS_SERVICE_DEPOSIT, GAS_SERVICE_FUEL, BOUNCED_TRANSFER, ABNORMAL,
+  // UTXO_BATCH_TRANSFER, ...: system / internal movements, never a user deposit (AUTO_FUEL tops up a user's
+  // deposit address with gas — crediting it would let the user withdraw the platform's gas, repeatedly)
+  if (tx.transactionType !== 'NORMAL') return 'IGNORE';
+
+  if (tx.transactionDirection === 'INFLOW') return 'CREDIT_DEPOSIT';
+
+  if (tx.transactionDirection === 'INTERNAL_TRANSFER') {
+    // Only a withdrawal created by your platform counts (user A withdraws to user B's deposit address).
+    // Any other vault-to-vault transfer (hot -> cold, manual ops) is not a deposit.
+    const order = await withdrawalOrderDao.findByTxKeyOrCustomerRefId(tx.txKey, tx.customerRefId);
+    return order ? 'SETTLE_WITHDRAWAL_AND_CREDIT_RECEIVER' : 'IGNORE';
+  }
+  return 'IGNORE';  // OUTFLOW: handled by the withdrawal flow (section 5), never credited
+}
+```
 
 ### 3-1. Webhook -- Primary Path
 
-Subscribe to `TRANSACTION_STATUS_CHANGED`. Filter for deposit (inflow) transactions:
+Subscribe to `TRANSACTION_STATUS_CHANGED`. Decide what each transaction does with `classifyTransaction` (above):
 
 ```typescript
 // In your webhook handler:
-function handleWebhookEvent(event: any) {
+async function handleWebhookEvent(event: any) {
   if (event.eventType !== 'TRANSACTION_STATUS_CHANGED') return;
 
   // Business fields are under eventDetail (event = {eventType, eventDetail})
   const detail = event.eventDetail;
-  const txType = detail.transactionType;            // "NORMAL"
-  const txDirection = detail.transactionDirection;  // "INFLOW"
 
-  if (txType === 'NORMAL' && txDirection === 'INFLOW') {
-    handleDepositStatusChange(detail);
+  switch (await classifyTransaction(detail)) {
+    case 'CREDIT_DEPOSIT':
+      await handleDepositStatusChange(detail);   // credits on COMPLETED only, idempotent by txKey
+      break;
+    case 'SETTLE_WITHDRAWAL_AND_CREDIT_RECEIVER':
+      await handleWithdrawalWebhook(detail);     // settle the sender's withdrawal order (section 5)
+      await handleDepositStatusChange(detail);   // credit the receiver only if the destination is a user deposit address
+      break;
+    case 'IGNORE':
+      break;                               // AUTO_FUEL / AUTO_SWEEP / ops transfers: never credited
   }
 }
 ```
@@ -100,7 +133,7 @@ function handleWebhookEvent(event: any) {
 **Critical rules for webhook handlers:**
 - Verify the signature and **durably** store the event (DB inbox / durable MQ — not an in-memory queue), then ack `{"code":"200","message":"SUCCESS"}`; process asynchronously, committing the idempotency marker and the credit in one DB transaction -- see [WEBHOOK.md](WEBHOOK.md)
 - **UTXO coins (BTC, LTC, DOGE, ...):** match the deposit by `destinationAddressList[]` (`address` / `amount`) — `destinationAddress` may be empty; credit each list entry that belongs to one of your users
-- **`INTERNAL_TRANSFER`:** a user withdrawing to another user's deposit address inside your own team arrives with `transactionDirection = INTERNAL_TRANSFER`, not `INFLOW` — handle it as the sender's withdrawal completion **and** the receiver's deposit, or it will never be credited
+- **`INTERNAL_TRANSFER`:** a user withdrawing to another user's deposit address inside your own team arrives with `transactionDirection = INTERNAL_TRANSFER`, not `INFLOW` — handle it as the sender's withdrawal completion **and** the receiver's deposit, but **only** when `transactionType = NORMAL` and it matches a withdrawal order on your platform (`classifyTransaction`). `AUTO_FUEL` / `AUTO_SWEEP` / `UTXO_COLLECTION` internal transfers are never credited
 - **Never roll back status** -- if DB already has `COMPLETED`, ignore a late `CONFIRMING` event
 - `BROADCASTING` and `CONFIRMING` may be skipped -- handle a direct jump to `COMPLETED`
 - Implement **idempotency by `txKey`** -- Safeheron may deliver the same event more than once
@@ -129,9 +162,17 @@ async function pollTransactions(lastPolledTimestampMs: number) {
     });
 
     for (const tx of txList) {
-      if ((tx.transactionDirection === 'INFLOW' || tx.transactionDirection === 'INTERNAL_TRANSFER')
-          && tx.transactionStatus === 'COMPLETED') {
-        await creditUserIfNotAlready(tx.txKey, tx);  // idempotent by txKey; skips non-deposit internal transfers
+      if (tx.transactionStatus !== 'COMPLETED') continue;
+      switch (await classifyTransaction(tx)) {   // same decision as the webhook path
+        case 'CREDIT_DEPOSIT':
+          await creditUserIfNotAlready(tx.txKey, tx);          // idempotent by txKey (shared with the webhook path)
+          break;
+        case 'SETTLE_WITHDRAWAL_AND_CREDIT_RECEIVER':
+          await settleWithdrawalIfNotAlready(tx.txKey, tx);    // idempotent by txKey
+          await creditUserIfNotAlready(tx.txKey, tx);          // only if the destination is a user deposit address
+          break;
+        case 'IGNORE':
+          break;
       }
     }
     if (txList.length < PAGE_SIZE) return;
@@ -232,10 +273,10 @@ try {
 
 ```typescript
 // `event` is the eventDetail of a TRANSACTION_* event (OUTFLOW, or INTERNAL_TRANSFER to an in-team address)
-function handleWithdrawalWebhook(event: any) {
+async function handleWithdrawalWebhook(event: any) {
   const { txKey, customerRefId, transactionStatus: newStatus } = event;
 
-  const order = withdrawalOrderDao.findByTxKeyOrCustomerRefId(txKey, customerRefId);
+  const order = await withdrawalOrderDao.findByTxKeyOrCustomerRefId(txKey, customerRefId);
   if (!order) return;  // unknown tx -- ignore
 
   // Never roll back status
@@ -243,16 +284,16 @@ function handleWithdrawalWebhook(event: any) {
 
   // Speed-up: the original tx ends FAILED while its replacement may still complete — keep the order open and let the replacement decide
   // (check BEFORE moving the order to a terminal state, otherwise the replacement's COMPLETED event is discarded)
-  if (['FAILED', 'REJECTED', 'CANCELLED'].includes(newStatus) && withdrawalOrderDao.hasActiveReplacement(order, txKey)) return;
+  if (['FAILED', 'REJECTED', 'CANCELLED'].includes(newStatus) && await withdrawalOrderDao.hasActiveReplacement(order, txKey)) return;
 
   order.status = newStatus;
-  withdrawalOrderDao.save(order);
+  await withdrawalOrderDao.save(order);
 
   if (newStatus === 'COMPLETED') {
-    notifyUserWithdrawalCompleted(order);
+    await notifyUserWithdrawalCompleted(order);
   } else if (['FAILED', 'REJECTED', 'CANCELLED'].includes(newStatus)) {
-    refundUserBalance(order);
-    notifyUserWithdrawalFailed(order);
+    await refundUserBalance(order);
+    await notifyUserWithdrawalFailed(order);
   }
 }
 ```

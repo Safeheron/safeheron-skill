@@ -25,7 +25,7 @@ Wallet Account 1          Wallet Account 2          Wallet Account ...
 |-----------|-----------|---------|
 | `INFLOW` | External -> team wallet | User deposit |
 | `OUTFLOW` | Team wallet -> external | User withdrawal |
-| `INTERNAL_TRANSFER` | Team wallet -> team wallet | Consolidation, gas top-up |
+| `INTERNAL_TRANSFER` | Team wallet -> team wallet | Consolidation, gas top-up (`AUTO_FUEL`), Auto Sweep — never a deposit; only a `NORMAL` one that matches one of your withdrawal orders is a user withdrawal to another in-team address |
 
 ---
 
@@ -70,9 +70,40 @@ Use **Webhook as primary + REST API polling as fallback**. Never rely on only on
 
 ### 3-1. Webhook -- Primary Path
 
-Subscribe to `TRANSACTION_STATUS_CHANGED`. Filter for deposit (inflow) transactions:
+Subscribe to `TRANSACTION_STATUS_CHANGED`. Decide what to do with each transaction through **one** classification function shared by the webhook handler and the polling fallback (3-2), so both paths apply the same rule:
 
 ```go
+// TxAction is what the deposit / withdrawal flow does with a transaction.
+type TxAction int
+
+const (
+    TxIgnore                    TxAction = iota // system movement or ops transfer: never credit
+    TxCreditDeposit                             // NORMAL INFLOW: credit the user who owns the deposit address
+    TxSettleWithdrawalAndCredit                 // NORMAL INTERNAL_TRANSFER that matches one of your withdrawal orders
+)
+
+// classifyTransaction is the ONLY place that decides whether a transaction may credit a user.
+// findWithdrawalOrderByTxKeyOrCustomerRefId is your lookup (placeholder): returns nil when no platform withdrawal order matches.
+func classifyTransaction(txType, direction, txKey, customerRefId string) TxAction {
+    if txType != "NORMAL" {
+        // AUTO_FUEL (Auto Sweep tops up a deposit address with gas -- vault -> vault, INTERNAL_TRANSFER),
+        // AUTO_SWEEP, UTXO_COLLECTION, GAS_SERVICE_DEPOSIT, GAS_SERVICE_FUEL, BOUNCED_TRANSFER, ABNORMAL,
+        // UTXO_BATCH_TRANSFER, ...: system / internal movements, never a user deposit
+        return TxIgnore
+    }
+    switch direction {
+    case "INFLOW":
+        return TxCreditDeposit
+    case "INTERNAL_TRANSFER":
+        if findWithdrawalOrderByTxKeyOrCustomerRefId(txKey, customerRefId) == nil {
+            return TxIgnore // ops transfer (e.g. hot -> cold wallet), not a user deposit
+        }
+        return TxSettleWithdrawalAndCredit
+    default:
+        return TxIgnore // OUTFLOW is handled by the withdrawal flow (section 5), never credited
+    }
+}
+
 // event = decrypted bizContent: {"eventType": ..., "eventDetail": {...}} — transaction fields are under eventDetail
 func processWebhookEvent(event map[string]interface{}) {
     eventType, _ := event["eventType"].(string)
@@ -87,13 +118,16 @@ func processWebhookEvent(event map[string]interface{}) {
 
     txDirection, _ := detail["transactionDirection"].(string)
     txType, _ := detail["transactionType"].(string)
+    txKey, _ := detail["txKey"].(string)
+    customerRefId, _ := detail["customerRefId"].(string)
 
-    switch {
-    case txType == "NORMAL" && txDirection == "INFLOW":
-        handleDepositStatusChange(detail)
-    case txDirection == "INTERNAL_TRANSFER":
-        // Team wallet -> team wallet. A user withdrawing to ANOTHER user's deposit address in your own
-        // platform is INTERNAL_TRANSFER, not OUTFLOW + INFLOW: settle the withdrawal order AND credit the receiver here
+    switch classifyTransaction(txType, txDirection, txKey, customerRefId) {
+    case TxCreditDeposit:
+        handleDepositStatusChange(detail) // credits on COMPLETED only, idempotent by txKey
+    case TxSettleWithdrawalAndCredit:
+        // A user withdrawing to ANOTHER user's deposit address on your platform is INTERNAL_TRANSFER, not
+        // OUTFLOW + INFLOW: settle the matched withdrawal order, and credit the receiver only if the destination
+        // is a user deposit address on your platform (idempotent by txKey)
         handleInternalTransfer(detail)
     }
 }
@@ -134,8 +168,15 @@ func pollTransactions(transactionApi api.TransactionApi, lastPolledMs int64) {
     }
 
     for _, tx := range txList {
-        if tx.TransactionDirection == "INFLOW" && tx.TransactionStatus == "COMPLETED" {
-            creditUserIfNotAlready(tx.TxKey, tx)
+        if tx.TransactionStatus != "COMPLETED" {
+            continue
+        }
+        // Same rule as the webhook path -- AUTO_FUEL / AUTO_SWEEP / ops transfers are never credited
+        switch classifyTransaction(tx.TransactionType, tx.TransactionDirection, tx.TxKey, tx.CustomerRefId) {
+        case TxCreditDeposit:
+            creditUserIfNotAlready(tx.TxKey, tx) // same txKey idempotency marker as the webhook path
+        case TxSettleWithdrawalAndCredit:
+            settleInternalTransferIfNotAlready(tx.TxKey, tx)
         }
     }
 }

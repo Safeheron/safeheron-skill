@@ -178,7 +178,7 @@ async function processInbox() {
 | `sourceAddress` | string | Sender address |
 | `destinationAddress` | string | Recipient address. **UTXO coins:** use `destinationAddressList[]` (`address` / `amount` / `memo`) instead — `destinationAddress` may be empty |
 | `destinationAddressList` | array | Multi-destination list (UTXO coins / batch transfers): `address`, `amount`, `memo` |
-| `transactionDirection` | string | `INFLOW` / `OUTFLOW` / `INTERNAL_TRANSFER` — a withdrawal to another address inside your own Safeheron team arrives as `INTERNAL_TRANSFER`, handle it both as the withdrawal's completion and (if applicable) as the receiver's deposit |
+| `transactionDirection` | string | `INFLOW` / `OUTFLOW` / `INTERNAL_TRANSFER` — a withdrawal to another address inside your own Safeheron team arrives as `INTERNAL_TRANSFER`, handle it as the withdrawal's completion and (if applicable) the receiver's deposit **only** when `transactionType = NORMAL` and it matches one of your withdrawal orders; `AUTO_FUEL` / `AUTO_SWEEP` / `UTXO_COLLECTION` internal transfers are never deposits (see `classifyTransaction` in BUSINESS_PATTERNS.md) |
 | `txFee` | string | Transaction fee paid |
 | `blockHeight` | number | Confirmed block height |
 | `createTime` | number | Unix timestamp (ms) |

@@ -503,7 +503,7 @@ switch (eventType) {
 - Return HTTP 200 as fast as possible — but only after the verified event is **durably** stored (DB inbox or durable MQ); never ack after handing off to an in-memory queue or `@Async`.
 - Store the raw encrypted payload in a database before processing, for auditability.
 - Deposits on UTXO coins: credit from `destinationAddressList[]` (address / amount), not only `destinationAddress`.
-- `transactionDirection = INTERNAL_TRANSFER` also covers withdrawals to another address inside your Safeheron team — handle it in both the withdrawal and the deposit flows.
+- `transactionDirection = INTERNAL_TRANSFER` covers both system transfers (Auto Sweep, gas top-up `AUTO_FUEL`, …) and user withdrawals to another address inside your Safeheron team. Credit a user only for a `NORMAL` internal transfer that matches a platform withdrawal order — see `classifyTransaction` in [BUSINESS_PATTERNS.md](BUSINESS_PATTERNS.md).
 - Implement idempotency by checking `txKey` before acting — Safeheron may deliver duplicates on retry.
 - Schedule a periodic call to `/v1/transactions/one` as a safety net.
 - Auto Sweep (归集), Gas refill, speed-up, and batch transfers all generate standard webhook events.

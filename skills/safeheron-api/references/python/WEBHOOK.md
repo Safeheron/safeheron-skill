@@ -162,6 +162,8 @@ def handle_transaction_event(event):
     # `destinationAddress` is not populated for UTXO coins.
     # transactionDirection: INFLOW / OUTFLOW / INTERNAL_TRANSFER (both sides are your vault accounts) --
     # a withdrawal to another user's deposit address on your platform arrives as INTERNAL_TRANSFER.
+    # Decide what to credit with classify_transaction() in BUSINESS_PATTERNS.md: only NORMAL INFLOW, and NORMAL
+    # INTERNAL_TRANSFER that matches your withdrawal order; AUTO_FUEL / AUTO_SWEEP / UTXO_COLLECTION are never credited.
 
 
 def handle_mpc_sign_event(event):

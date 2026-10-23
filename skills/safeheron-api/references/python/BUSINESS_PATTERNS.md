@@ -25,7 +25,7 @@ Wallet Account 1          Wallet Account 2          Wallet Account ...
 |-----------|-----------|---------|
 | `INFLOW` | External -> team wallet | User deposit |
 | `OUTFLOW` | Team wallet -> external | User withdrawal |
-| `INTERNAL_TRANSFER` | Team wallet -> team wallet (source and destination are both `VAULT_ACCOUNT`) | Consolidation, gas top-up, **a user withdrawing to another user's deposit address on your platform** |
+| `INTERNAL_TRANSFER` | Team wallet -> team wallet (source and destination are both `VAULT_ACCOUNT`) | Consolidation, gas top-up (`AUTO_FUEL`), and a user withdrawing to another user's deposit address on your platform. **Only a `NORMAL` internal transfer that matches one of your withdrawal orders is ever credited** — see `classify_transaction` below |
 
 ---
 
@@ -69,23 +69,50 @@ Use **Webhook as primary + REST API polling as fallback**. Never rely on only on
 
 ### 3-1. Webhook -- Primary Path
 
-Subscribe to `TRANSACTION_STATUS_CHANGED`. Filter for deposit (inflow) transactions:
+Subscribe to `TRANSACTION_STATUS_CHANGED`. Decide what each transaction does with ONE classification function shared by the webhook handler and the polling job (3-2):
 
 ```python
+# Module level: one classification rule shared by the webhook handler AND the polling job below.
+IGNORE = 'IGNORE'
+CREDIT_DEPOSIT = 'CREDIT_DEPOSIT'
+SETTLE_WITHDRAWAL_AND_CREDIT_RECEIVER = 'SETTLE_WITHDRAWAL_AND_CREDIT_RECEIVER'
+
+
+def classify_transaction(tx):
+    # Anything but NORMAL is a system / ops movement, never a user deposit: AUTO_FUEL (Auto Sweep gas top-up of a
+    # deposit address, vault -> vault = INTERNAL_TRANSFER), AUTO_SWEEP, UTXO_COLLECTION, GAS_SERVICE_DEPOSIT,
+    # GAS_SERVICE_FUEL, BOUNCED_TRANSFER, ABNORMAL, UTXO_BATCH_TRANSFER, ...
+    if tx.get('transactionType') != 'NORMAL':
+        return IGNORE
+    direction = tx.get('transactionDirection')
+    if direction == 'INFLOW':
+        return CREDIT_DEPOSIT
+    if direction == 'INTERNAL_TRANSFER':
+        # Only a transfer created by one of YOUR withdrawal orders (user A -> user B's deposit address) is credited;
+        # any other internal transfer (hot -> cold, manual consolidation, ...) is not a deposit.
+        order = find_withdrawal_order(tx.get('txKey'), tx.get('customerRefId'))  # placeholder: your order store
+        return SETTLE_WITHDRAWAL_AND_CREDIT_RECEIVER if order is not None else IGNORE
+    return IGNORE  # OUTFLOW: handled by the withdrawal flow (section 5), never credited
+
+
 # In your webhook handler:
 event_type = biz_content.get('eventType')
 if event_type != 'TRANSACTION_STATUS_CHANGED':
     return
 
 event_detail = biz_content.get('eventDetail') or {}  # business fields live under eventDetail
-tx_type = event_detail.get('transactionType')       # "NORMAL"
-tx_direction = event_detail.get('transactionDirection')  # "INFLOW"
-status = event_detail.get('transactionStatus')
+action = classify_transaction(event_detail)
+if action == CREDIT_DEPOSIT:
+    handle_deposit_status_change(event_detail)        # credit only on COMPLETED, idempotent by txKey
+elif action == SETTLE_WITHDRAWAL_AND_CREDIT_RECEIVER:
+    handle_internal_withdrawal(event_detail)          # settle the withdrawal order + credit receiver on COMPLETED
+# IGNORE: system / ops movements (AUTO_FUEL, AUTO_SWEEP, UTXO_COLLECTION, ...) -- never credited
 
-if tx_type == 'NORMAL' and tx_direction in ('INFLOW', 'INTERNAL_TRANSFER'):
-    # INTERNAL_TRANSFER: e.g. user A withdraws to user B's deposit address on your platform --
-    # settle A's withdrawal AND credit B; ignore your own consolidation / gas top-up transfers
-    handle_deposit_status_change(event_detail)
+
+def handle_internal_withdrawal(event_detail):
+    """Settle the matching withdrawal order (same rules as section 5) and, on COMPLETED, credit each output whose
+    address is a user deposit address on your platform -- in ONE DB transaction, idempotent by txKey."""
+    ...  # placeholder: settle_withdrawal(event_detail) + credit outputs via find_user_by_deposit_address(...)
 
 
 def deposit_outputs(event_detail):
@@ -129,8 +156,14 @@ param.transactionStatus = "COMPLETED"
 
 tx_list = transaction_api.list_transactions_v2(param)
 for tx in tx_list:
-    if tx.get('transactionDirection') == 'INFLOW' and tx.get('transactionStatus') == 'COMPLETED':
-        credit_user_if_not_already(tx['txKey'], tx)
+    if tx.get('transactionStatus') != 'COMPLETED':
+        continue
+    action = classify_transaction(tx)                  # same rule as the webhook path
+    if action == CREDIT_DEPOSIT:
+        credit_user_if_not_already(tx['txKey'], tx)    # idempotent by txKey (webhook may have credited it already)
+    elif action == SETTLE_WITHDRAWAL_AND_CREDIT_RECEIVER:
+        handle_internal_withdrawal(tx)                 # also idempotent by txKey
+    # IGNORE: AUTO_FUEL / AUTO_SWEEP / UTXO_COLLECTION / ops transfers -- never credited
 ```
 
 ---

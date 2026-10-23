@@ -144,6 +144,8 @@ import (
 )
 
 // 1. Build ERC-20 transfer calldata (toAddress: recipient hex string; tokenAmount: *big.Int in the token's smallest unit)
+// The transaction goes to the TOKEN CONTRACT; the recipient is only an argument inside the calldata
+tokenContract := common.HexToAddress(tokenContractAddress) // e.g. the USDT contract address
 to := common.HexToAddress(toAddress)
 fnHash := sha3.NewLegacyKeccak256()
 fnHash.Write([]byte("transfer(address,uint256)"))
@@ -157,7 +159,7 @@ data = append(data, common.LeftPadBytes(tokenAmount.Bytes(), 32)...)
 tx := types.NewTx(&types.DynamicFeeTx{
     ChainID:   chainID,
     Nonce:     nonce,
-    To:        &to,
+    To:        &tokenContract, // NOT the recipient — sending to the recipient succeeds on-chain but moves no tokens
     Value:     big.NewInt(0),
     Data:      data,
     Gas:       gasLimit,

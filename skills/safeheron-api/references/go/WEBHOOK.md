@@ -457,7 +457,7 @@ if txAmount.LessThan(minDeposit) {
 - Store the raw encrypted payload in a database before processing, for auditability.
 - Implement idempotency by checking `txKey` before acting -- Safeheron may deliver duplicates on retry.
 - **UTXO deposits:** read `destinationAddressList[]` (`address`, `amount`) -- `destinationAddress` / `txAmount` alone miss multi-output and UTXO deposits.
-- **`transactionDirection = INTERNAL_TRANSFER`:** a withdrawal to another address in your own team is reported as an internal transfer, not OUTFLOW -- it must still settle the withdrawal order (and credit the receiving side if that address belongs to a user).
+- **`transactionDirection = INTERNAL_TRANSFER`:** a withdrawal to another address in your own team is reported as an internal transfer, not OUTFLOW -- it must still settle the withdrawal order (and credit the receiving side if that address belongs to a user). Only a `transactionType = NORMAL` internal transfer that matches one of your withdrawal orders may credit anyone: Auto Sweep's gas top-up (`AUTO_FUEL`), `AUTO_SWEEP`, `UTXO_COLLECTION` and ops transfers are also INTERNAL_TRANSFER and must never be credited -- use `classifyTransaction` in [BUSINESS_PATTERNS.md](BUSINESS_PATTERNS.md).
 - Schedule a periodic call to `/v1/transactions/one` as a safety net.
 - Verify the webhook signature on **every single request** -- never skip this step in production.
 - Apply IP whitelist at the firewall level, not just application code.

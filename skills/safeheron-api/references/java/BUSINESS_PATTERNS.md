@@ -27,7 +27,7 @@ From the team's perspective, every transaction is one of three directions:
 |-----------|-----------|---------|
 | `INFLOW` | External → team wallet (`sourceType` ≠ `VAULT_ACCOUNT`, `destType` = `VAULT_ACCOUNT`) | User deposit |
 | `OUTFLOW` | Team wallet → external (`sourceType` = `VAULT_ACCOUNT`, `destType` ≠ `VAULT_ACCOUNT`) | User withdrawal |
-| `INTERNAL_TRANSFER` | Team wallet → team wallet (both = `VAULT_ACCOUNT`) | Consolidation, gas top-up |
+| `INTERNAL_TRANSFER` | Team wallet → team wallet (both = `VAULT_ACCOUNT`) | Consolidation, gas top-up (`AUTO_FUEL`), and a user withdrawing to another in-team address. Only the last one (a `NORMAL` tx matching a platform withdrawal order) ever credits a user |
 
 ---
 
@@ -72,7 +72,30 @@ Use **Webhook as primary + REST API polling as fallback**. Never rely on only on
 
 ### 3-1. Webhook — Primary Path
 
-Subscribe to `TRANSACTION_STATUS_CHANGED`. Filter for deposit (inflow) transactions:
+Subscribe to `TRANSACTION_STATUS_CHANGED`. Decide **in code** whether a transaction credits anyone, with ONE function shared by the webhook and the polling path:
+
+```java
+enum TxAction { IGNORE, CREDIT_DEPOSIT, SETTLE_WITHDRAWAL_AND_CREDIT_RECEIVER }
+
+// Shared by the webhook handler AND the polling loop — the only place that decides whether a transaction credits a user
+TxAction classifyTransaction(String transactionType, String direction, String txKey, String customerRefId) {
+    if (!"NORMAL".equals(transactionType)) {
+        // AUTO_FUEL, AUTO_SWEEP, UTXO_COLLECTION, GAS_SERVICE_DEPOSIT, GAS_SERVICE_FUEL, BOUNCED_TRANSFER, ABNORMAL, ...:
+        // system movements. Auto Sweep fuelling a user's deposit address is AUTO_FUEL + INTERNAL_TRANSFER — never a deposit
+        return TxAction.IGNORE;
+    }
+    if ("INFLOW".equals(direction)) {
+        return TxAction.CREDIT_DEPOSIT;
+    }
+    if ("INTERNAL_TRANSFER".equals(direction)) {
+        // Only a platform withdrawal that lands on another in-team address; ops transfers (hot -> cold, ...) have no order
+        return withdrawalOrderDao.findByTxKeyOrCustomerRefId(txKey, customerRefId) != null
+                ? TxAction.SETTLE_WITHDRAWAL_AND_CREDIT_RECEIVER
+                : TxAction.IGNORE;
+    }
+    return TxAction.IGNORE;   // OUTFLOW: handled by the withdrawal flow (section 5), never credited
+}
+```
 
 ```java
 // In your inbox worker (event = decrypted bizContent: {eventType, eventDetail}):
@@ -84,13 +107,22 @@ String txType      = detail.get("transactionType").asText();       // "NORMAL"
 String txDirection = detail.get("transactionDirection").asText();  // "INFLOW"
 String status      = detail.get("transactionStatus").asText();
 
-if ("NORMAL".equals(txType) && "INFLOW".equals(txDirection)) {
-    handleDepositStatusChange(detail);
+switch (classifyTransaction(txType, txDirection, detail.path("txKey").asText(null), detail.path("customerRefId").asText(null))) {
+    case CREDIT_DEPOSIT:
+        handleDepositStatusChange(detail);       // credits on COMPLETED only, idempotent by txKey
+        break;
+    case SETTLE_WITHDRAWAL_AND_CREDIT_RECEIVER:
+        handleWithdrawalStatusChange(detail);    // settles the withdrawal order (section 5)
+        handleDepositStatusChange(detail);       // credits only destinations that are user deposit addresses on your platform
+        break;
+    default:
+        break;                                   // IGNORE
 }
 ```
 
 - **UTXO coins** (BTC, LTC, DOGE, …): credit from `destinationAddressList[]` (each item has `address` / `amount`); `destinationAddress` alone is not enough.
-- **`INTERNAL_TRANSFER`**: a withdrawal to an address that belongs to your own Safeheron team arrives with `transactionDirection = INTERNAL_TRANSFER`, not `OUTFLOW` / `INFLOW` — handle it in both the withdrawal and the deposit flows.
+- **`INTERNAL_TRANSFER`**: a user withdrawal to another address in your own Safeheron team arrives as `INTERNAL_TRANSFER`, not `OUTFLOW` / `INFLOW`. It settles the withdrawal and credits the receiver **only** when it is `NORMAL` and matches a platform withdrawal order. Gas top-ups (`AUTO_FUEL`), sweeps and other system transfers have the same direction and must never be credited.
+- `handleDepositStatusChange` credits each destination (`destinationAddressList[]` for UTXO coins) that is a user deposit address, resolved via `findUserByDepositAddress`; skip destinations that are not.
 
 **Status progression for inflow transactions:**
 
@@ -124,9 +156,17 @@ List<TransactionsResponse> txList = ServiceExecutor.execute(
         transactionApi.listTransactionsV2(req));
 
 for (TransactionsResponse tx : txList) {
-    if ("INFLOW".equals(tx.getTransactionDirection())
-            && "COMPLETED".equals(tx.getTransactionStatus())) {
-        creditUserIfNotAlready(tx.getTxKey(), tx);
+    if (!"COMPLETED".equals(tx.getTransactionStatus())) {
+        continue;
+    }
+    // Same rule as the webhook path: AUTO_FUEL / AUTO_SWEEP / other non-NORMAL transfers are never credited
+    TxAction action = classifyTransaction(tx.getTransactionType(), tx.getTransactionDirection(),
+            tx.getTxKey(), tx.getCustomerRefId());
+    if (action == TxAction.CREDIT_DEPOSIT) {
+        creditUserIfNotAlready(tx.getTxKey(), tx);       // idempotent by txKey: a webhook-credited tx is not credited again
+    } else if (action == TxAction.SETTLE_WITHDRAWAL_AND_CREDIT_RECEIVER) {
+        settleWithdrawalIfNotAlready(tx.getTxKey(), tx); // settle the matched withdrawal order (section 5), idempotent by txKey
+        creditUserIfNotAlready(tx.getTxKey(), tx);       // credit only destinations that are user deposit addresses
     }
 }
 ```
@@ -242,6 +282,8 @@ try {
 
 ```java
 // In webhook handler for TRANSACTION_STATUS_CHANGED
+// handleWithdrawalStatusChange(detail): OUTFLOW events, plus INTERNAL_TRANSFER events classified as
+// SETTLE_WITHDRAWAL_AND_CREDIT_RECEIVER (section 3-1)
 String txKey         = event.get("txKey").asText();
 String customerRefId = event.get("customerRefId").asText();
 String newStatus     = event.get("transactionStatus").asText();
