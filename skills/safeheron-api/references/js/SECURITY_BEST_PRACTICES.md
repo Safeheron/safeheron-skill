@@ -62,12 +62,13 @@ await transactionApi.createTransactions({ customerRefId, ... });
 One-time address (`ONE_TIME_ADDRESS`) must only be used for genuinely temporary, one-off payment scenarios.
 
 **2-3. AML check is mandatory before every transfer.**
-Use KYA screening via `ComplianceApi` to screen the destination address before creating the transaction.
+Use KYA screening via `ComplianceApi` to screen the destination address before creating the transaction. Block or alert on HIGH / SEVERE (and, by default, UNKNOWN) risk results.
 
 ```typescript
 const created = await complianceApi.createKyaScreening({
   address: destinationAddress,
-  chainType: 'ETH',
+  chainType: 'EVM',        // see kyaSupportedNetworks()
+  network: 'Ethereum',
   providers: ['Chainalysis'],
 });
 
@@ -77,8 +78,23 @@ for (let i = 0; i < 30; i++) {
   if (result.status === 'FINISHED') break;
   await new Promise(resolve => setTimeout(resolve, 2000));
 }
+// Fail closed: an unfinished screening is NOT a pass
+if (result.status !== 'FINISHED') {
+  throw new Error(`KYA screening not finished for ${destinationAddress}, route to manual review`);
+}
+if (!Array.isArray(result.orders) || result.orders.length === 0) {
+  throw new Error(`KYA screening returned no provider result for ${destinationAddress}`);
+}
+// Whitelist: only LOW / MEDIUM pass (adjust per your policy); HIGH, SEVERE, UNKNOWN, a missing level or FAILED are blocked
+const allowedRiskLevels = new Set(['LOW', 'MEDIUM']);
 for (const order of result.orders) {
-  if (order.riskLevel === 'HIGH' || order.riskLevel === 'SEVERE') {
+  if (order.status === 'SKIPPED') {
+    continue;   // manually skipped in Web Console
+  }
+  if (order.status !== 'COMPLETED') {
+    throw new Error(`KYA screening ${order.status} (${order.provider}), route to manual review`);
+  }
+  if (!allowedRiskLevels.has(order.riskLevel)) {
     throw new Error(`AML check failed: ${destinationAddress} is ${order.riskLevel} risk`);
   }
 }
@@ -90,9 +106,14 @@ for (const order of result.orders) {
 const checkResp = await coinApi.checkCoinAddress({
   coinKey: 'ETHEREUM_ETH',
   address: destinationAddress,
+  checkAddressValid: true,  // required — without it addressValid is not checked
+  checkAml: true,           // without it amlValid is always true
 });
 if (!checkResp.addressValid) {
   throw new Error(`Invalid address format: ${destinationAddress}`);
+}
+if (!checkResp.amlValid) {
+  throw new Error(`Address is on Safeheron's AML blacklist: ${destinationAddress}`);  // blacklist only — still run KYA (2-3)
 }
 ```
 
@@ -113,43 +134,17 @@ txAmount: '0.001',
 
 ### Rules for Generated Code
 
-**The Co-Signer callback service must never blindly approve all transactions.**
-Every approval callback must implement the following business validations before returning `APPROVE`:
+**The Co-Signer callback service must never blindly approve anything.** Use the handler and `decide()` in [COSIGNER.md](COSIGNER.md) as the REQUIRED pattern — do not write a reduced version. It enforces:
 
-| Validation | What to Check |
+| Rule | What it checks |
 |---|---|
-| `customerRefId` | Must match a real pending business order in your system |
-| Amount | Must exactly match the amount recorded in your business system for that order |
-| Destination address | Must exactly match the address recorded in your business system for that order |
-
-```typescript
-app.post('/cosigner/callback', async (req, res) => {
-  // 1. Decrypt and verify signature (always first)
-  const payload = converter.requestV3convert(req.body);
-  const data = JSON.parse(payload);
-
-  // 2. Look up the business order
-  const order = await orderService.findByCustomerRefId(data.customerRefId);
-  if (!order) {
-    console.warn('Unknown customerRefId:', data.customerRefId);
-    return res.json(converter.responseV3convert({ action: 'REJECT', approvalId: data.approvalId }));
-  }
-
-  // 3. Validate amount matches business system
-  if (data.txAmount !== order.amount) {
-    console.warn('Amount mismatch');
-    return res.json(converter.responseV3convert({ action: 'REJECT', approvalId: data.approvalId }));
-  }
-
-  // 4. Validate destination address matches business system
-  if (data.destinationAddress?.toLowerCase() !== order.destinationAddress?.toLowerCase()) {
-    console.warn('Address mismatch');
-    return res.json(converter.responseV3convert({ action: 'REJECT', approvalId: data.approvalId }));
-  }
-
-  return res.json(converter.responseV3convert({ action: 'APPROVE', approvalId: data.approvalId }));
-});
-```
+| Default REJECT | Unknown callback types, unknown `transactionType`, evaluation errors → `REJECT`; unverifiable requests → HTTP 500, no signed response |
+| `MPC_SIGN` / `WEB3_SIGN` | Verified against your pending sign request (`dataList`, `messageHash` / `message` / `transaction`) — never auto-approved |
+| `NORMAL` / `UTXO_BATCH_TRANSFER` | `customerRefId` matches a real pending order; coin (`coinKey`) and **every** destination address + amount + memo match it (UTXO coins use `destinationAddressList`) |
+| `UTXO_COLLECTION` / `AUTO_FUEL` | Destination account type is `VAULT_ACCOUNT` (+ fuel policy) |
+| `AUTO_SWEEP` | Destination account and USD amount match your Auto Sweep policy |
+| `GAS_SERVICE_DEPOSIT` | Deposit exists in your records and destination account type is `PROFILE_ACCOUNT` |
+| AML / KYT | Only `LOW` / `MEDIUM` pass (`HIGH` / `SEVERE` / `UNKNOWN` / unexpected values rejected); `FAILED` or unknown status rejected; wait (neither APPROVE nor REJECT) while `IN_PROGRESS` / `PENDING`, then reject after ~5 min — see [AML / KYT Handling](COSIGNER.md#aml--kyt-handling-in-the-callback) |
 
 **Additional Co-Signer deployment rules:**
 - The Co-Signer host must be in a **private isolated network** -- never exposed to the public internet.
@@ -168,8 +163,8 @@ The SDK's `WebHookConverter.convertWebHook()` verifies signatures automatically.
 **4-2. Webhook endpoint must use HTTPS.**
 Never expose an HTTP Webhook endpoint in production.
 
-**4-3. Idempotency is required.**
-Safeheron retries delivery up to 7 times. The handler must safely process duplicate events.
+**4-3. Idempotency and durability are required.**
+Failed deliveries are retried 6 times (30s, 1m, 5m, 1h, 12h, 24h) and duplicates can arrive anyway. Ack only after the verified event is **durably** stored (DB inbox / durable MQ — not an in-memory queue), and commit the idempotency marker together with the business side-effects in one DB transaction. `resendFailed` re-pushes TRANSACTION_*, MPC_SIGN_*, WEB3_SIGN_*, ILLEGAL_IP_REQUEST, NO_MATCHING_TRANSACTION_POLICY, WHITELIST_*, GAS_BALANCE_WARNING and AML_KYT_ALERT — only `TOKEN_BLACKLIST_ADDRESS_HIT` cannot be re-pushed. Full pattern: [WEBHOOK.md](WEBHOOK.md) Step 2–3.
 
 **4-4. IP whitelist -- only accept from Safeheron egress IPs.**
 - `18.162.105.64`
@@ -181,19 +176,30 @@ Safeheron retries delivery up to 7 times. The handler must safely process duplic
 **4-6. Handle out-of-order delivery.**
 
 ```typescript
-app.post('/webhook', (req, res) => {
-  // 1. Verify signature -- reject if invalid
+app.post('/webhook', async (req, res) => {
   try {
-    const decrypted = converter.convertWebHook(req.body);
-    // 2. Return 200 immediately; process asynchronously
-    eventQueue.publish(decrypted);
+    // 1. Verify signature + decrypt — convertWebHook() throws Error('webhook signature verification failed') on a bad sig
+    const { eventType, eventDetail } = JSON.parse(converter.convertWebHook(req.body));
+    // 2. Durably store before acking (DB inbox insert or durable MQ publish with confirmation) —
+    //    never an in-memory queue: the event is lost if the process crashes after the ack
+    await eventInbox.saveIfAbsent({ eventType, eventDetail });
   } catch (e) {
-    console.error('Webhook signature verification failed:', e);
+    if (e instanceof Error && e.message === 'webhook signature verification failed') {
+      console.error('Webhook signature verification FAILED — possible tampering:', e);
+      return res.status(401).end();
+    }
+    // Internal error (decrypt / parse / store) — a non-SUCCESS response makes Safeheron retry
+    // (30s, 1m, 5m, 1h, 12h, 24h); after that, recover via re-push (`resendFailed` — every event type except TOKEN_BLACKLIST_ADDRESS_HIT) or REST polling
+    console.error('Webhook processing error:', e);
+    return res.status(500).end();
   }
-  res.json({ code: 200, message: 'SUCCESS' });
+  // 3. Ack ONLY after the event is verified and durably stored.
+  //    Body per docs: code is the string '200'; any non-SUCCESS response is retried by Safeheron
+  res.json({ code: '200', message: 'SUCCESS' });
 });
 
-// In async processor:
+// In the inbox worker — `event` is the eventDetail of a TRANSACTION_* event. Run it inside one DB transaction
+// with marking the inbox row done (see WEBHOOK.md Step 3):
 async function processWebhookEvent(event: any) {
   const tx = await transactionRepository.findByTxKey(event.txKey);
 
@@ -244,7 +250,7 @@ function isTerminalStatus(status: string): boolean {
 | AML check | Mandatory before every outbound transfer via ComplianceApi KYA screening |
 | Address validation | Mandatory before whitelist add or transfer via CoinApi.checkCoinAddress() |
 | Amounts | String in API; never floating-point number |
-| Co-Signer callback | Validate customerRefId + amount + address against business system |
+| Co-Signer callback | Use the handler and `decide()` in COSIGNER.md: rules per transactionType (order + coin + address + amount + memo for NORMAL), AML/KYT whitelist, default REJECT |
 | Webhook | HTTPS only; verify signature; idempotent; IP whitelist |
 | Webhook ordering | Terminal state wins; discard late intermediate-state events |
 | Webhook fallback | REST API polling + oneTransactions() |

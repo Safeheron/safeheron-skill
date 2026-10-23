@@ -2,7 +2,7 @@
 
 ## Overview
 
-Safeheron's Gas Station (Auto Gas Refill) service automatically tops up wallet gas when balances fall below a configured threshold, enabling uninterrupted operations for deposit wallets.
+With the Gas Service enabled, Safeheron can automatically supplement the necessary Gas fees for transactions, enabling uninterrupted operations for deposit wallets. A wallet's `autoFuel` setting controls this: if set to true, the Gas Service will automatically supplement the Gas fee for the wallet when a transaction is initiated (see [WALLET_API.md](WALLET_API.md)). The alert threshold set in the Gas Service is used for the `GAS_BALANCE_WARNING` webhook (see below).
 
 The `GasApiService` provides:
 - Query current gas station balance
@@ -37,7 +37,7 @@ Query the current gas balance and auto-refill configuration:
 
 ```java
 GasStatusRequest req = new GasStatusRequest();
-// req.setNetworkMode("..."); // optional: filter by network mode
+// req.setNetworkMode("MAINNET"); // optional: MAINNET or TESTNET
 
 GasStatusResponse resp = ServiceExecutor.execute(gasApi.gasStatus(req));
 
@@ -57,7 +57,7 @@ for (GasStatusResponse.Configuration cfg : resp.getConfiguration()) {
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `networkMode` | String | Optional. Filter by network mode. |
+| `networkMode` | String | Optional. Network mode: `MAINNET` (mainnet) / `TESTNET` (testnet) |
 
 ### GasStatusResponse Structure
 
@@ -72,8 +72,8 @@ for (GasStatusResponse.Configuration cfg : resp.getConfiguration()) {
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `network` | String | Blockchain network name (Ethereum, TRON, BNB Smart Chain, Arbitrum, Polygon) |
-| `enabled` | Boolean | Whether auto gas refill is enabled for this network |
+| `network` | String | Network. Currently supported networks are: Ethereum, TRON, BNB Smart Chain, Arbitrum, Polygon, Solana, Optimism, Base, Avalanche C-Chain, TRON(Shasta), Sepolia |
+| `enabled` | Boolean | Whether automatic refueling is enabled |
 
 ---
 
@@ -121,7 +121,7 @@ Status values:
 
 ## Webhook — Gas Balance Warning
 
-When the gas station balance drops below the configured threshold, Safeheron sends a webhook notification:
+When Gas Service is enabled and an alert threshold is set, Safeheron sends a webhook notification when the Gas balance is detected below the threshold (during automatic fueling, when the threshold is first set or updated, or after a top-up that still leaves it below). It is triggered at most once every 30 minutes:
 
 ```
 Event Type: GAS_BALANCE_WARNING
@@ -135,11 +135,11 @@ See [WEBHOOK.md](WEBHOOK.md) for full webhook handling setup.
 
 Auto Sweep (automatic fund collection) and Gas Station work together:
 - Deposit wallets tagged with `DEPOSIT` label are eligible for auto sweep.
-- Gas Station automatically provides gas when needed for these wallets.
+- The Gas Service can supply the Gas these transactions need — see the `autoFuel` description in [WALLET_API.md](WALLET_API.md).
 - All sweep/gas/regular/speed-up transactions are reported via Webhook identically.
 
 Auto Sweep prerequisites:
-1. Target wallets must have `DEPOSIT` label set (see `UpdateAccountRequest.setAccountTag("DEPOSIT")`).
+1. Target wallets must have `DEPOSIT` label set (`BatchUpdateAccountTagRequest` + `accountApi.batchUpdateAccountTag`, see below).
 2. Auto Sweep policy must be configured in Safeheron Console.
 3. Incoming transaction must satisfy the sweep policy threshold.
 4. Gas station must have sufficient balance.
@@ -158,5 +158,5 @@ ServiceExecutor.execute(accountApi.batchUpdateAccountTag(req));
 
 - **Gas Station balance is separate from wallet balances** — top up via Safeheron Console.
 - If auto-refill keeps failing, check: gas station balance, network congestion, and policy configuration.
-- Supported networks for auto gas refill: Ethereum, TRON, BNB Smart Chain, Arbitrum, Polygon.
+- Supported networks for Gas Service: Ethereum, TRON, BNB Smart Chain, Arbitrum, Polygon, Solana, Optimism, Base, Avalanche C-Chain, TRON(Shasta), Sepolia.
 - Gas API queries the team's Gas Station service, not individual wallet gas balances.

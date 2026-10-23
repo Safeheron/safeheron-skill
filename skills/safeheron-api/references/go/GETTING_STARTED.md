@@ -130,7 +130,6 @@ package main
 
 import (
     "fmt"
-    "os"
 
     "github.com/Safeheron/safeheron-api-sdk-go/safeheron"
     "github.com/Safeheron/safeheron-api-sdk-go/safeheron/api"

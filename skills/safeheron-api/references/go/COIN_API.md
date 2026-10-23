@@ -74,10 +74,16 @@ for _, coin := range coins {
 
 Use before adding to whitelist or sending funds:
 
+> `CheckAml` / `AmlValid` only checks Safeheron's AML blacklist. For real address risk screening (risk levels incl. `SEVERE`), use **KYA** — see [COMPLIANCE_API.md](COMPLIANCE_API.md). Do not use the deprecated AML Checker (`/v1/tools/aml-checker/*`).
+
 ```go
 req := api.CheckCoinAddressRequest{
-    CoinKey: "ETHEREUM_ETH",
-    Address: "0xAbCd...",
+    CoinKey:           "ETHEREUM_ETH",
+    Address:           "0xAbCd...",
+    CheckAddressValid: true, // without it AddressValid is not verified
+    CheckAml:          true, // without it AmlValid defaults to true (no check performed)
+    // CheckContract:           true, // reports whether the address is a contract (Contract)
+    // CheckSolanaOwnerAddress: true, // Solana only: reports whether it is an owner address (SolanaOwnerAddress)
 }
 
 var resp api.CheckCoinAddressResponse
@@ -89,9 +95,29 @@ if !resp.AddressValid {
     panic("invalid address format")
 }
 if !resp.AmlValid {
-    panic("address failed AML check")
+    panic("address is on the AML blacklist")
 }
 ```
+
+**CheckCoinAddressRequest Fields:**
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `CoinKey` | Yes | `string` | Coin key |
+| `Address` | Yes | `string` | Coin receiving address |
+| `CheckContract` | No | `bool` | Verify contract address (default false) |
+| `CheckAml` | No | `bool` | Verify AML compliance (if not provided or not verified, the address is treated as AML-compliant) |
+| `CheckAddressValid` | No | `bool` | Verify the validity of address format (default false) |
+| `CheckSolanaOwnerAddress` | No | `bool` | Verify if the Solana address is the Owner address (default false) |
+
+**CheckCoinAddressResponse Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `AddressValid` | `bool` | Valid address format |
+| `Contract` | `bool` | Contract address |
+| `AmlValid` | `bool` | true: AML valid address; false: AML blacklisted address |
+| `SolanaOwnerAddress` | `bool` | true: Solana owner address; false: not a Solana owner address |
 
 ---
 

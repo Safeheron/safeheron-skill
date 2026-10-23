@@ -27,7 +27,7 @@ From the team's perspective, every transaction is one of three directions:
 |-----------|-----------|---------|
 | `INFLOW` | External → team wallet (`sourceType` ≠ `VAULT_ACCOUNT`, `destType` = `VAULT_ACCOUNT`) | User deposit |
 | `OUTFLOW` | Team wallet → external (`sourceType` = `VAULT_ACCOUNT`, `destType` ≠ `VAULT_ACCOUNT`) | User withdrawal |
-| `INTERNAL_TRANSFER` | Team wallet → team wallet (both = `VAULT_ACCOUNT`) | Consolidation, gas top-up |
+| `INTERNAL_TRANSFER` | Team wallet → team wallet (both = `VAULT_ACCOUNT`) | Consolidation, gas top-up (`AUTO_FUEL`), and a user withdrawing to another in-team address. Only the last one (a `NORMAL` tx matching a platform withdrawal order) ever credits a user |
 
 ---
 
@@ -72,33 +72,69 @@ Use **Webhook as primary + REST API polling as fallback**. Never rely on only on
 
 ### 3-1. Webhook — Primary Path
 
-Subscribe to `TRANSACTION_STATUS_CHANGED`. Filter for deposit (inflow) transactions:
+Subscribe to `TRANSACTION_STATUS_CHANGED`. Decide **in code** whether a transaction credits anyone, with ONE function shared by the webhook and the polling path:
 
 ```java
-// In your webhook handler:
+enum TxAction { IGNORE, CREDIT_DEPOSIT, SETTLE_WITHDRAWAL_AND_CREDIT_RECEIVER }
+
+// Shared by the webhook handler AND the polling loop — the only place that decides whether a transaction credits a user
+TxAction classifyTransaction(String transactionType, String direction, String txKey, String customerRefId) {
+    if (!"NORMAL".equals(transactionType)) {
+        // AUTO_FUEL, AUTO_SWEEP, UTXO_COLLECTION, GAS_SERVICE_DEPOSIT, GAS_SERVICE_FUEL, BOUNCED_TRANSFER, ABNORMAL, ...:
+        // system movements. Auto Sweep fuelling a user's deposit address is AUTO_FUEL + INTERNAL_TRANSFER — never a deposit
+        return TxAction.IGNORE;
+    }
+    if ("INFLOW".equals(direction)) {
+        return TxAction.CREDIT_DEPOSIT;
+    }
+    if ("INTERNAL_TRANSFER".equals(direction)) {
+        // Only a platform withdrawal that lands on another in-team address; ops transfers (hot -> cold, ...) have no order
+        return withdrawalOrderDao.findByTxKeyOrCustomerRefId(txKey, customerRefId) != null
+                ? TxAction.SETTLE_WITHDRAWAL_AND_CREDIT_RECEIVER
+                : TxAction.IGNORE;
+    }
+    return TxAction.IGNORE;   // OUTFLOW: handled by the withdrawal flow (section 5), never credited
+}
+```
+
+```java
+// In your inbox worker (event = decrypted bizContent: {eventType, eventDetail}):
 String eventType = event.get("eventType").asText();
 if (!"TRANSACTION_STATUS_CHANGED".equals(eventType)) return;
 
-String txType      = event.get("transactionType").asText();       // "NORMAL"
-String txDirection = event.get("transactionDirection").asText();  // "INFLOW"
-String status      = event.get("transactionStatus").asText();
+JsonNode detail    = event.get("eventDetail");                     // business fields live under eventDetail
+String txType      = detail.get("transactionType").asText();       // "NORMAL"
+String txDirection = detail.get("transactionDirection").asText();  // "INFLOW"
+String status      = detail.get("transactionStatus").asText();
 
-if ("NORMAL".equals(txType) && "INFLOW".equals(txDirection)) {
-    handleDepositStatusChange(event);
+switch (classifyTransaction(txType, txDirection, detail.path("txKey").asText(null), detail.path("customerRefId").asText(null))) {
+    case CREDIT_DEPOSIT:
+        handleDepositStatusChange(detail);       // credits on COMPLETED only, idempotent by txKey
+        break;
+    case SETTLE_WITHDRAWAL_AND_CREDIT_RECEIVER:
+        handleWithdrawalStatusChange(detail);    // settles the withdrawal order (section 5)
+        handleDepositStatusChange(detail);       // credits only destinations that are user deposit addresses on your platform
+        break;
+    default:
+        break;                                   // IGNORE
 }
 ```
+
+- **UTXO coins** (BTC, LTC, DOGE, …): credit from `destinationAddressList[]` (each item has `address` / `amount`); `destinationAddress` alone is not enough.
+- **`INTERNAL_TRANSFER`**: a user withdrawal to another address in your own Safeheron team arrives as `INTERNAL_TRANSFER`, not `OUTFLOW` / `INFLOW`. It settles the withdrawal and credits the receiver **only** when it is `NORMAL` and matches a platform withdrawal order. Gas top-ups (`AUTO_FUEL`), sweeps and other system transfers have the same direction and must never be credited.
+- `handleDepositStatusChange` credits each destination (`destinationAddressList[]` for UTXO coins) that is a user deposit address, resolved via `findUserByDepositAddress`; skip destinations that are not.
 
 **Status progression for inflow transactions:**
 
 | Status | Meaning | Action |
 |--------|---------|--------|
-| `BROADCASTING` | On-chain, 0 confirmations | Optionally show "pending" to user |
+| `BROADCASTING` | Being broadcast, 0 confirmations — for inflows only Bitcoin reports this state | Optionally show "pending" to user |
 | `CONFIRMING` | ≥1 confirmation | Optionally show confirmation count |
 | `COMPLETED` | ≥N confirmations (Safeheron default) | **Credit user account** |
 | `FAILED` | Failed on-chain | No credit |
 
 **Critical rules for webhook handlers:**
-- Return HTTP 200 **immediately** before any processing — put work on an async queue
+- Verify the signature and **durably** store the event (DB inbox or durable MQ — not an in-memory queue), then ack `{"code":"200","message":"SUCCESS"}`; process asynchronously — see [WEBHOOK.md](WEBHOOK.md)
 - **Never roll back status** — if DB already has `COMPLETED`, ignore a late `CONFIRMING` event
 - `BROADCASTING` and `CONFIRMING` may be skipped — handle a direct jump to `COMPLETED`
 - Implement **idempotency by `txKey`** — Safeheron may deliver the same event more than once
@@ -113,16 +149,24 @@ Poll the transaction list periodically to catch any missed webhooks:
 // Run every few minutes as a background job
 ListTransactionsV2Request req = new ListTransactionsV2Request();
 req.setLimit(50L);
-req.setCreateTimeMin(lastPolledTimestampMs);
+req.setCreateTimeMin(lastPolledTimestampMs);   // always set it: the default window is only the last 24h
 req.setTransactionStatus("COMPLETED");   // or omit to get all statuses
 
 List<TransactionsResponse> txList = ServiceExecutor.execute(
         transactionApi.listTransactionsV2(req));
 
 for (TransactionsResponse tx : txList) {
-    if ("INFLOW".equals(tx.getTransactionDirection())
-            && "COMPLETED".equals(tx.getTransactionStatus())) {
-        creditUserIfNotAlready(tx.getTxKey(), tx);
+    if (!"COMPLETED".equals(tx.getTransactionStatus())) {
+        continue;
+    }
+    // Same rule as the webhook path: AUTO_FUEL / AUTO_SWEEP / other non-NORMAL transfers are never credited
+    TxAction action = classifyTransaction(tx.getTransactionType(), tx.getTransactionDirection(),
+            tx.getTxKey(), tx.getCustomerRefId());
+    if (action == TxAction.CREDIT_DEPOSIT) {
+        creditUserIfNotAlready(tx.getTxKey(), tx);       // idempotent by txKey: a webhook-credited tx is not credited again
+    } else if (action == TxAction.SETTLE_WITHDRAWAL_AND_CREDIT_RECEIVER) {
+        settleWithdrawalIfNotAlready(tx.getTxKey(), tx); // settle the matched withdrawal order (section 5), idempotent by txKey
+        creditUserIfNotAlready(tx.getTxKey(), tx);       // credit only destinations that are user deposit addresses
     }
 }
 ```
@@ -238,6 +282,8 @@ try {
 
 ```java
 // In webhook handler for TRANSACTION_STATUS_CHANGED
+// handleWithdrawalStatusChange(detail): OUTFLOW events, plus INTERNAL_TRANSFER events classified as
+// SETTLE_WITHDRAWAL_AND_CREDIT_RECEIVER (section 3-1)
 String txKey         = event.get("txKey").asText();
 String customerRefId = event.get("customerRefId").asText();
 String newStatus     = event.get("transactionStatus").asText();
@@ -247,6 +293,11 @@ if (order == null) return;  // unknown tx — ignore
 
 // Never roll back status
 if (isTerminalStatus(order.getStatus())) return;
+
+// Speed-up: the original tx ends FAILED while its replacement may still complete — keep the order open and let the replacement decide
+// (check BEFORE moving the order to a terminal state, otherwise the replacement's COMPLETED event is discarded)
+boolean failed = "FAILED".equals(newStatus) || "REJECTED".equals(newStatus) || "CANCELLED".equals(newStatus);
+if (failed && withdrawalOrderDao.hasActiveReplacement(order, txKey)) return;
 
 order.setStatus(newStatus);
 withdrawalOrderDao.save(order);
@@ -292,8 +343,10 @@ Blockchain gas fees fluctuate. A stuck transaction blocks all subsequent transac
 
 ```java
 RecreateTransactionRequest req = new RecreateTransactionRequest();
-req.setTxKey(stuckTxKey);
-req.setTxFeeLevel("HIGH");   // use a higher fee to replace the stuck tx
+req.setTxKey(stuckTxKey);     // required
+req.setTxHash(stuckTxHash);   // required — on-chain hash of the stuck tx
+req.setCoinKey(coinKey);      // required
+req.setTxFeeLevel("HIGH");    // use a higher fee to replace the stuck tx
 
 TxKeyResult resp = ServiceExecutor.execute(transactionApi.recreateTransactions(req));
 String newTxKey = resp.getTxKey();
@@ -305,8 +358,8 @@ String newTxKey = resp.getTxKey();
 
 **Important:** A user withdrawal order may end up linked to multiple Safeheron `txKey` values (original + one or more speed-ups). Your DB schema must support this 1:many relationship. The final completed `txKey` is the canonical one.
 
-Chains that support speed-up: all EVM chains, BTC, BCH, DASH, LTC, DOGE, FIL, Aptos, CFX.
-Chains that do NOT support speed-up: NEAR, SUI, TRON, SOL, TON.
+Chains that support speed-up: EVM chains (ETH, ETC, BSC, MATIC, etc.), Bitcoin and Dogecoin (RBF and CPFP) and other UTXO-based chains supporting CPFP, FileCoin, Aptos, XRP Ledger.
+Chains that do NOT support speed-up: any chain not listed above (e.g. NEAR, SUI, TRON, SOL, TON — not listed in the published docs as supported).
 
 ---
 
@@ -314,19 +367,15 @@ Chains that do NOT support speed-up: NEAR, SUI, TRON, SOL, TON.
 
 ### At withdrawal time (before submitting to Safeheron):
 - Run destination address through your internal risk engine
-- Optionally use KYA address screening via `ComplianceApiService` — see [COMPLIANCE_API.md](COMPLIANCE_API.md)
-- Reject withdrawals to high-risk or blacklisted addresses before they reach Safeheron
+- Screen the destination address with **KYA** (`ComplianceApiService.kyaScreeningCreate` → poll `kyaScreeningOne`) — see [COMPLIANCE_API.md](COMPLIANCE_API.md). Do **not** use the deprecated AML Checker (`/v1/tools/aml-checker/*`, `ToolsApiService.amlCheckerRequest/amlCheckerRetrieves`), and `checkAml` in `checkCoinAddress` is not a substitute for KYA
+- Reject withdrawals to `HIGH` / `SEVERE` (and, by default, `UNKNOWN`) risk addresses before they reach Safeheron
 
 ### Via Safeheron's built-in AML:
 - `failOnAml: true` (default) — Safeheron blocks the transaction if destination is flagged by its AML provider
-- `amlLock` field in webhook/transaction response indicates whether AML blocked a deposit
+- `amlLock` field in webhook/transaction response indicates whether the **source** address contains AML address(es) — useful when deciding whether to credit a deposit
 
 ### In the Approval Callback Service (Co-Signer):
-```java
-// Check AML risk in callback
-for (TransactionApproval.Aml aml : req.getAmlList()) {
-    if ("HIGH".equalsIgnoreCase(aml.getRiskLevel())) {
-        return "REJECT";
-    }
-}
-```
+Use `evaluateAml(approvalId, tx)` in `CoSignerCallbackController` ([COSIGNER.md](COSIGNER.md#aml--kyt-handling-in-the-callback)):
+- Only `riskLevel` `LOW` / `MEDIUM` pass by default — `HIGH`, `SEVERE`, `UNKNOWN` and unexpected values are rejected
+- While `amlScreeningTriggeredState = IN_PROGRESS` or any `status = PENDING`, return neither APPROVE nor REJECT (Co-Signer retries every 5s); fall back to reject / manual review ~5 min after the first callback for that approval
+- `status = FAILED`, a missing / unknown status, or `TRIGGERED` with an empty `amlList` → reject and alert

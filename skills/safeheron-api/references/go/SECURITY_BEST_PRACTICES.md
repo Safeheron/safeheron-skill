@@ -62,7 +62,7 @@ Use KYA screening via `ComplianceApi` to screen the destination address before c
 // Required before creating any outbound transaction
 createReq := api.KyaScreeningRequest{
     Address:   destinationAddress,
-    ChainType: "ETH",
+    ChainType: "EVM", // published example value; valid values via KyaSupportedNetworks()
     Providers: []string{"Chainalysis"},
 }
 var created api.KyaScreeningCreateResponse
@@ -81,9 +81,24 @@ for i := 0; i < 30; i++ {
     }
     time.Sleep(2 * time.Second)
 }
+// Fail closed: an unfinished screening is NOT a pass
+if result.Status != "FINISHED" {
+    panic(fmt.Sprintf("KYA screening not finished for %s, route to manual review", destinationAddress))
+}
+if len(result.Orders) == 0 {
+    panic(fmt.Sprintf("KYA screening returned no provider result for %s", destinationAddress))
+}
+// Whitelist: only LOW / MEDIUM pass (adjust per your policy); HIGH, SEVERE, UNKNOWN, a missing level or FAILED are blocked
+allowedRiskLevels := map[string]bool{"LOW": true, "MEDIUM": true}
 for _, order := range result.Orders {
-    if order.RiskLevel == "HIGH" || order.RiskLevel == "SEVERE" {
-        panic(fmt.Sprintf("AML check failed: %s is %s risk", destinationAddress, order.RiskLevel))
+    if order.Status == "SKIPPED" {
+        continue // manually skipped in Web Console
+    }
+    if order.Status != "COMPLETED" {
+        panic(fmt.Sprintf("KYA screening %s (%s), route to manual review", order.Status, order.Provider))
+    }
+    if !allowedRiskLevels[order.RiskLevel] {
+        panic(fmt.Sprintf("AML check failed: %s is %q risk", destinationAddress, order.RiskLevel))
     }
 }
 ```
@@ -92,8 +107,9 @@ for _, order := range result.Orders {
 
 ```go
 checkReq := api.CheckCoinAddressRequest{
-    CoinKey: "ETHEREUM_ETH",
-    Address: destinationAddress,
+    CoinKey:           "ETHEREUM_ETH",
+    Address:           destinationAddress,
+    CheckAddressValid: true, // required — without it AddressValid is not verified and the check below is meaningless
 }
 var checkResp api.CheckCoinAddressResponse
 if err := coinApi.CheckCoinAddress(checkReq, &checkResp); err != nil {
@@ -111,7 +127,7 @@ Never use `float32` or `float64` for monetary values.
 import "github.com/shopspring/decimal"
 
 // CORRECT
-amount := decimal.NewFromString("0.001")
+amount := decimal.RequireFromString("0.001") // or decimal.NewFromString(s) and handle the error
 req.TxAmount = amount.String()
 
 // WRONG -- never use float for amounts
@@ -124,41 +140,17 @@ req.TxAmount = amount.String()
 
 ### Rules for Generated Code
 
-**The Co-Signer callback service must never blindly approve all transactions.**
-Every approval callback must implement the following business validations before returning `APPROVE`:
+**The Co-Signer callback service must never blindly approve anything.** Use the handler (`decide()`) in [COSIGNER.md](COSIGNER.md) as the REQUIRED pattern — do not write a reduced version. It enforces:
 
-| Validation | What to Check |
+| Rule | What it checks |
 |---|---|
-| `customerRefId` | Must match a real pending business order in your system |
-| Amount | Must exactly match the amount recorded in your business system |
-| Destination address | Must exactly match the address recorded in your business system |
-
-```go
-// REQUIRED pattern for Co-Signer approval callback
-func evaluateTransaction(content map[string]interface{}) string {
-    customerRefId, _ := content["customerRefId"].(string)
-
-    // 1. Look up the business order
-    order := findOrderByCustomerRefId(customerRefId)
-    if order == nil {
-        return "REJECT" // unknown order
-    }
-
-    // 2. Validate amount matches
-    txAmount, _ := decimal.NewFromString(content["txAmount"].(string))
-    if !txAmount.Equal(order.Amount) {
-        return "REJECT" // amount mismatch
-    }
-
-    // 3. Validate destination address matches
-    destAddr, _ := content["destinationAddress"].(string)
-    if destAddr != order.DestinationAddress {
-        return "REJECT" // address mismatch
-    }
-
-    return "APPROVE"
-}
-```
+| Default REJECT | Unknown callback types, unknown `transactionType`, parse errors → `REJECT` |
+| `MPC_SIGN` / `WEB3_SIGN` | Verified against your pending sign request (`dataList`, `messageHash` / `message` / `transaction`) — never auto-approved |
+| `NORMAL` / `UTXO_BATCH_TRANSFER` | `customerRefId` matches a real pending order; coin (`coinKey`) and **every** destination address + amount + memo match it (UTXO coins use `destinationAddressList`) |
+| `UTXO_COLLECTION` / `AUTO_FUEL` | Destination account type is `VAULT_ACCOUNT` (+ fuel policy) |
+| `AUTO_SWEEP` | Destination account and USD amount match your Auto Sweep policy |
+| `GAS_SERVICE_DEPOSIT` | Deposit exists in your records and destination account type is `PROFILE_ACCOUNT` |
+| AML / KYT | Only `LOW` / `MEDIUM` pass (`HIGH` / `SEVERE` / `UNKNOWN` / unexpected values rejected); `FAILED` or unknown status rejected; wait (neither APPROVE nor REJECT) while `IN_PROGRESS` / `PENDING`, then reject after ~5 min — see [AML / KYT Handling](COSIGNER.md#aml--kyt-handling-in-the-callback) |
 
 **Additional Co-Signer deployment rules:**
 - The Co-Signer host must be in a **private isolated network**.
@@ -172,14 +164,14 @@ func evaluateTransaction(content map[string]interface{}) string {
 ### Rules for Generated Code
 
 **4-1. Verify signature before any processing.**
-The SDK's `WebhookConverter.Convert()` handles verification. Reject events with invalid signatures immediately.
+The SDK's `WebhookConverter.Convert()` handles verification. Respond `401` on an invalid signature and `500` on an internal error (decrypt / parse / durable store); respond `{"code":"200","message":"SUCCESS"}` **only** after the event is verified and **durably** stored (DB inbox / durable MQ) — any non-SUCCESS response makes Safeheron retry (6 times: 30s, 1m, 5m, 1h, 12h, 24h). An in-memory channel or fire-and-forget goroutine loses events acked just before a crash, and `ResendFailed` cannot re-push `TOKEN_BLACKLIST_ADDRESS_HIT` (the other published event types can be re-pushed, within 7 days). See [WEBHOOK.md](WEBHOOK.md).
 
 **4-2. Webhook endpoint should use HTTPS in production.**
 
 **4-3. Idempotency is required.**
-Safeheron retries delivery up to 7 times. Never double-credit a deposit or double-process a withdrawal.
+Failed deliveries are retried 6 times (30s, 1m, 5m, 1h, 12h, 24h) and duplicates can arrive anyway. Never double-credit a deposit or double-process a withdrawal: write the idempotency marker and the business side-effects in the **same DB transaction** (never commit the marker first and process afterwards).
 
-**4-4. IP whitelist -- only accept from Safeheron egress IPs.**
+**4-4. IP whitelist -- only accept from Safeheron egress IPs** (not listed in the published API reference — confirm the current list with Safeheron Support).
 - `18.162.105.64`
 - `18.167.22.59`
 - `18.167.21.182`
@@ -236,7 +228,7 @@ Do not rely solely on Webhooks. Run a periodic goroutine to poll the transaction
 | AML check | Mandatory before every outbound transfer via ComplianceApi KYA screening |
 | Address validation | Mandatory before whitelist add or transfer via CoinApi.CheckCoinAddress() |
 | Amounts | `string` in API, `decimal.Decimal` in code; never float |
-| Co-Signer callback | Validate customerRefId + amount + address against business system |
+| Co-Signer callback | Use the COSIGNER.md handler (`decide()`): rules per transactionType (order + coin + address + amount + memo for NORMAL), AML/KYT whitelist, default REJECT |
 | Webhook | HTTPS preferred; verify signature; idempotent; IP whitelist |
 | Webhook ordering | Terminal state wins; discard late intermediate-state events |
 | Webhook fallback | REST API polling as backup |

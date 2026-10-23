@@ -8,6 +8,10 @@ Two main integration points:
 1. **KYT** — retrieve AML risk reports for completed transactions (`kyt_report`).
 2. **KYA** — proactively screen a blockchain address before transacting (`create_kya_screening` / `kya_screening_one` / `kya_screening_order_one`).
 
+> ⚠️ **Deprecated — do not use:** the AML Checker APIs (`/v1/tools/aml-checker/request`, `/v1/tools/aml-checker/retrieves`, i.e. `ToolsApi.aml_checker_request` / `aml_checker_retrieves`) are scheduled for discontinuation. Always use the KYA APIs above for address screening — they support more networks and multiple providers (Elliptic, Chainalysis, MistTrack). The `checkAml` flag of `check_coin_address` only checks Safeheron's AML blacklist and is not a substitute for KYA.
+>
+> **Risk levels** (`riskLevel`, used by KYT, KYA and the Co-Signer callback): `LOW` / `MEDIUM` / `HIGH` / `SEVERE` / `UNKNOWN`. Always handle `SEVERE` — it is the highest level, above `HIGH`.
+
 ---
 
 ## Imports
@@ -94,8 +98,8 @@ Initiate an address screening against one or more AML providers in parallel:
 ```python
 param = CreateKyaScreeningRequest()
 param.address = '0xRecipientAddress'
-param.chainType = 'ETH'
-# param.network = 'ethereum'  # required when providers includes MistTrack
+param.chainType = 'EVM'  # published example value; valid values via kya_supported_networks()
+# param.network = 'Ethereum'  # required when providers includes MistTrack
 param.providers = ['Elliptic', 'Chainalysis']
 
 resp = compliance_api.create_kya_screening(param)
@@ -221,11 +225,11 @@ for n in networks:
 
 ---
 
-## AML Lock Behavior
+## failOnAml Behavior (destination AML check)
 
 When `failOnAml=True` (default) in `CreateTransactionRequest`, Safeheron will:
-1. Automatically run AML checks on the destination address.
-2. Block the transaction if the address scores high-risk (`amlLock = "YES"`).
+1. Assess the `destinationAddress` through its AML/KYT provider when the transaction is initiated.
+2. Prohibit the transaction if the destination address presents compliance risks.
 
 To disable AML blocking (not recommended for production):
 
@@ -233,10 +237,10 @@ To disable AML blocking (not recommended for production):
 from safeheron_api_sdk_python.api.transaction_api import TransactionApi, CreateTransactionRequest
 
 param = CreateTransactionRequest()
-param.failOnAml = False  # disable AML lock -- use with caution
+param.failOnAml = False  # disable the failOnAml destination check -- use with caution
 ```
 
-The transaction response `amlLock` field indicates `"YES"` or `"NO"`.
+Separately, the transaction response field `amlLock` tells whether the **source** address contains AML address(es) (`"YES"` / `"NO"`) — it is not the result of the `failOnAml` destination check.
 
 ---
 
@@ -253,7 +257,7 @@ tx = transaction_api.one_transactions(param)
 
 for aml in tx.get('amlList', []):
     print(f"{aml['provider']} risk: {aml['riskLevel']}")
-print(f"AML locked: {tx.get('amlLock', 'NO')}")
+print(f"Source address contains AML address(es): {tx.get('amlLock', 'NO')}")
 ```
 
 ---
@@ -268,7 +272,7 @@ import time
 # Step 1: Create KYA screening
 screen_param = CreateKyaScreeningRequest()
 screen_param.address = destination_address
-screen_param.chainType = 'ETH'
+screen_param.chainType = 'EVM'  # valid values via kya_supported_networks()
 screen_param.providers = ['Chainalysis']
 created = compliance_api.create_kya_screening(screen_param)
 
@@ -282,13 +286,26 @@ for i in range(30):
         break
     time.sleep(2)
 
-# Step 3: Handle each riskLevel according to your own business logic
-for order in result.get('orders', []):
-    risk_level = order.get('riskLevel')
-    # Decide what to do based on risk_level (LOW / MEDIUM / HIGH / SEVERE / UNKNOWN).
-    # For example, block HIGH/SEVERE, require manual review for MEDIUM, allow LOW, etc.
-    # Implement the subsequent business logic (block, alert, proceed with transaction, ...) yourself.
-    ...
+# Step 3: Fail closed -- an unfinished or empty screening is NOT a pass
+if result is None or result.get('status') != 'FINISHED':
+    raise RuntimeError(f"KYA screening not finished for {destination_address}, route to manual review")
+orders = result.get('orders') or []
+if not orders:
+    raise RuntimeError(f"KYA screening returned no provider result for {destination_address}")
+
+# Step 4: Whitelist risk levels -- only LOW / MEDIUM pass (adjust per your compliance policy);
+# HIGH, SEVERE, UNKNOWN, a missing level, FAILED or any unexpected status are blocked
+ALLOWED_RISK_LEVELS = {'LOW', 'MEDIUM'}
+for order in orders:
+    status = (order.get('status') or '').strip().upper()
+    if status == 'SKIPPED':
+        continue  # manually skipped in Web Console
+    if status != 'COMPLETED':
+        raise RuntimeError(f"KYA screening {order.get('status')} ({order.get('provider')}), route to manual review")
+    risk_level = (order.get('riskLevel') or 'UNKNOWN').strip().upper()
+    if risk_level not in ALLOWED_RISK_LEVELS:
+        raise RuntimeError(f"AML check failed: {destination_address} is {risk_level} risk")
+# All checks passed -- proceed with the transfer
 ```
 
 ---

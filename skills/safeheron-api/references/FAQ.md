@@ -171,7 +171,7 @@ https://support.safeheron.com/help-center/product-and-solution/dive-into-safeher
 
 **Q: What are Safeheron's outbound (egress) IP addresses? (For configuring firewall whitelists to receive webhooks/callbacks)**
 
-A: Safeheron's outbound IPs for webhooks and callbacks:
+A: Safeheron's outbound IPs for webhooks and callbacks (not listed in the published API reference — confirm the current list with Safeheron Support):
 - `18.162.105.64`
 - `18.167.22.59`
 - `18.167.21.182`
@@ -541,7 +541,7 @@ A:
 1. **HTTPS is mandatory** — never expose an HTTP Webhook endpoint in production. All Webhook URLs must use HTTPS.
 2. **IP whitelist via VPC security group or firewall** — only allow inbound traffic from Safeheron's egress IPs: `18.162.105.64`, `18.167.22.59`, `18.167.21.182`. Block all other sources.
 3. **Verify signature before processing** — validate the `sig` field in every Webhook payload using Safeheron's RSA public key before taking any action. Reject events with invalid signatures.
-4. **Idempotent handler** — Safeheron retries up to 7 times; ensure duplicate events do not cause double-crediting or double-processing.
+4. **Idempotent handler** — failed deliveries are retried 6 times (30s, 1m, 5m, 1h, 12h, 24h) and duplicates can arrive anyway; ensure duplicate events do not cause double-crediting or double-processing.
 5. **Terminal state wins** — never downgrade a transaction status (e.g., `COMPLETED` → `CONFIRMING`). Out-of-order delivery is possible; if a terminal-state event was already applied, discard any later intermediate-state event for the same transaction.
 
 ---

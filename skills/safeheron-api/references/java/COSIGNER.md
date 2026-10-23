@@ -4,18 +4,18 @@
 
 The API Co-Signer is a service you deploy that **automatically approves or rejects transactions** based on your business logic. It replaces manual approval workflows for programmatic use cases and is required for unattended operation in production environments.
 
-When a transaction requires approval, Safeheron calls your **Approval Callback Service** (an HTTP endpoint you implement) with an encrypted callback payload. Your service evaluates the transaction and responds `APPROVE` or `REJECT`.
+When a transaction requires approval, Safeheron calls your **Approval Callback Service** (an HTTP endpoint you implement) with an encrypted callback payload. Your service evaluates the transaction and responds `APPROVE` or `REJECT` (or any other value to keep it pending, e.g. while KYT screening is still running).
 
 ---
 
 ## How It Works
 
 ```
-1. Client creates transaction / MPC sign / Web3 sign
+1. A transaction / MPC sign / Web3 sign is created (via API, Safeheron App or Web Console)
 2. Safeheron: transaction enters SUBMITTED status
 3. API Co-Signer polls Safeheron (every 5s in v2.x, every 1s in v1.x)
 4. API Co-Signer calls your Approval Callback Service (HTTP POST)
-5. Your service returns APPROVE or REJECT
+5. Your service returns APPROVE or REJECT (any other value → Co-Signer retries every 5s)
 6. Transaction proceeds to SIGNING or is REJECTED
 ```
 
@@ -68,76 +68,289 @@ public class CoSignerConfig {
 
 ### Spring Boot Approval Callback Controller (V3 — Recommended)
 
+> Placeholders you must implement: `OrderService` / `BusinessOrder` (your order store — `getCoinKey()` and `getOutputs()`, the expected destinations as `OrderOutput` with `getAddress()`, `getAmount()` as a decimal string and `getMemo()`), `matchesFuelPolicy`, `matchesSweepPolicy`, `matchesGasDepositPolicy`, `matchesMpcSignRequest`, `matchesWeb3SignRequest`.
+
 ```java
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.safeheron.client.cosigner.CoSignerBizContentV3;
+import com.safeheron.client.cosigner.CoSignerCallBackV3;
+import com.safeheron.client.cosigner.CoSignerConverter;
+import com.safeheron.client.cosigner.CoSignerResponseV3;
+import com.safeheron.client.cosigner.MPCSignApproval;
+import com.safeheron.client.cosigner.TransactionApproval;
+import com.safeheron.client.cosigner.Web3SignApproval;
+import com.safeheron.client.request.DestinationAddress;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Collections;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
+@Slf4j
 @RestController
 public class CoSignerCallbackController {
 
-    @Autowired
-    private CoSignerConverter coSignerConverter;
+    // Current Co-Signer sends TRANSACTION / MPC_SIGN / WEB3_SIGN / CALLBACK_TEST;
+    // the other values are legacy type names also recognised by the Safeheron SDK
+    private static final Set<String> TX_TYPES = Set.of("TRANSACTION", "TX_TRANSACTION", "CONNECT_TX_SEND", "TX_CONNECT_TX_SEND", "TRANSACTION_BATCH_UTXO");
+    private static final Set<String> WEB3_TYPES = Set.of("WEB3_SIGN", "ETH_SIGN", "PERSONAL_SIGN", "ETH_SIGN_TYPED_DATA", "ETH_SIGNTRANSACTION");
+
+    private final CoSignerConverter coSignerConverter;
+    private final ObjectMapper objectMapper;
+    private final OrderService orderService;
+
+    public CoSignerCallbackController(CoSignerConverter coSignerConverter, ObjectMapper objectMapper, OrderService orderService) {
+        this.coSignerConverter = coSignerConverter;
+        this.objectMapper = objectMapper;
+        this.orderService = orderService;
+    }
 
     @PostMapping("/cosigner/callback")
     public Map<String, String> handleCallback(@RequestBody CoSignerCallBackV3 encryptedBody) throws Exception {
         // 1. Decrypt and verify signature using Co-Signer identity public key
         CoSignerBizContentV3 bizContent = coSignerConverter.requestV3Convert(encryptedBody);
+        // SDK <= 1.0.15 TransactionApproval does not model the top-level `memo` (TON / XRP Ledger) —
+        // read it from the already signature-verified raw payload
+        JsonNode rawDetail = objectMapper.readTree(Base64.getDecoder().decode(encryptedBody.getBizContent())).path("detail");
+        String action = decide(bizContent, rawDetail.path("memo").isTextual() ? rawDetail.path("memo").asText() : null);
 
-        // Default REJECT — only set APPROVE when all checks pass
         CoSignerResponseV3 response = new CoSignerResponseV3();
         response.setApprovalId(bizContent.getApprovalId());
-        response.setAction("REJECT");
+        response.setAction(action);
+        return coSignerConverter.responseV3Converter(response);
+    }
 
+    // Default REJECT — return APPROVE only when every check passes
+    private String decide(CoSignerBizContentV3 bizContent, String memo) {
         String callbackType = bizContent.getType();
-        // Dispatch by type group
-        Set<String> txTypes = Set.of("TRANSACTION", "TX_TRANSACTION", "CONNECT_TX_SEND", "TX_CONNECT_TX_SEND", "TRANSACTION_BATCH_UTXO");
-        Set<String> web3Types = Set.of("ETH_SIGN", "PERSONAL_SIGN", "ETH_SIGN_TYPED_DATA", "ETH_SIGNTRANSACTION");
-
-        if (txTypes.contains(callbackType)) {
-            // Handle transaction approval — fall through to validation below
-        } else if ("MPC_SIGN".equals(callbackType)) {
-            // MPC raw sign — implement your MPC sign validation here
-            // e.g. verify sourceAccountKey, signAlg, hashs against your pending sign request
-            response.setAction("APPROVE");
-            return coSignerConverter.responseV3Converter(response);
-        } else if (web3Types.contains(callbackType)) {
-            // Web3 sign — implement your Web3 sign validation here
-            // e.g. verify subjectType, message content against your pending sign request
-            response.setAction("APPROVE");
-            return coSignerConverter.responseV3Converter(response);
-        } else {
-            // Unknown type — reject by default
-            return coSignerConverter.responseV3Converter(response);
+        if (callbackType == null) {
+            return "REJECT";
+        }
+        if ("CALLBACK_TEST".equals(callbackType)) {
+            // Connectivity test sent by `cosigner callback-test` — detail is empty, no real transaction involved
+            return "APPROVE";
+        }
+        if ("MPC_SIGN".equals(callbackType)) {
+            // Verify txKey/customerRefId, sourceAccountKey and dataList against your pending MPC sign request
+            MPCSignApproval mpc = objectMapper.convertValue(bizContent.getDetail(), MPCSignApproval.class);
+            return matchesMpcSignRequest(mpc) ? "APPROVE" : "REJECT";
+        }
+        if (WEB3_TYPES.contains(callbackType)) {
+            // SDK <= 1.0.15 does not convert the "WEB3_SIGN" detail — it stays a Map, so convert it yourself.
+            // Branch on subjectType and verify message / messageHash / transaction against your pending request
+            Web3SignApproval web3 = objectMapper.convertValue(bizContent.getDetail(), Web3SignApproval.class);
+            return matchesWeb3SignRequest(web3) ? "APPROVE" : "REJECT";
+        }
+        if (!TX_TYPES.contains(callbackType)) {
+            log.warn("REJECT: unknown callback type {}", callbackType);
+            return "REJECT";
         }
 
-        // 2. Parse the transaction detail
-        TransactionApproval tx = parseTransactionDetail(bizContent.getDetail());
+        TransactionApproval tx = objectMapper.convertValue(bizContent.getDetail(), TransactionApproval.class);
+        if (tx == null) {
+            return "REJECT";
+        }
 
-        // 3. Verify customerRefId matches a real pending order
+        // 2. Business rules by transactionType (Safeheron "TRANSACTION Type Approval" best practices)
+        if (!passesBusinessRules(tx, memo)) {
+            log.warn("REJECT: business rules failed, txKey={}, transactionType={}", tx.getTxKey(), tx.getTransactionType());
+            return "REJECT";
+        }
+
+        // 3. AML / KYT check (see "AML / KYT Handling in the Callback" below)
+        AmlDecision amlDecision = evaluateAml(bizContent.getApprovalId(), tx);
+        if (amlDecision == AmlDecision.WAIT) {
+            // Neither APPROVE nor REJECT → Co-Signer re-sends this approval every 5s with the latest KYT report
+            return ACTION_WAIT;
+        }
+        return amlDecision == AmlDecision.PASS ? "APPROVE" : "REJECT";
+    }
+
+    // Per Safeheron "TRANSACTION Type Approval" best practices; any other subtype is rejected
+    private boolean passesBusinessRules(TransactionApproval tx, String memo) {
+        String transactionType = tx.getTransactionType() == null ? "" : tx.getTransactionType();
+        switch (transactionType) {
+            case "NORMAL":               // API-created, or manually initiated in App / Web Console —
+                                         // a manual one has no business order and is rejected here
+            case "UTXO_BATCH_TRANSFER":
+                return matchesBusinessOrder(tx, memo);
+            case "UTXO_COLLECTION":      // API or manual sweep — destination must be your own vault account
+                return "VAULT_ACCOUNT".equals(tx.getDestinationAccountType());
+            case "AUTO_FUEL":            // system-initiated by Auto Sweep, no business order
+                return "VAULT_ACCOUNT".equals(tx.getDestinationAccountType()) && matchesFuelPolicy(tx);
+            case "AUTO_SWEEP":           // system-initiated, no business order: destination + USD amount per your policy
+                return matchesSweepPolicy(tx);
+            case "GAS_SERVICE_DEPOSIT":  // confirm the deposit exists in your records; destination must be PROFILE_ACCOUNT
+                return "PROFILE_ACCOUNT".equals(tx.getDestinationAccountType()) && matchesGasDepositPolicy(tx);
+            default:
+                return false;
+        }
+    }
+
+    private boolean matchesBusinessOrder(TransactionApproval tx, String memo) {
         BusinessOrder order = orderService.findByCustomerRefId(tx.getCustomerRefId());
         if (order == null) {
-            return coSignerConverter.responseV3Converter(response);
+            return false;
         }
-
-        // 4. Verify amount matches exactly
-        if (new BigDecimal(tx.getTxAmount()).compareTo(order.getExpectedAmount()) != 0) {
-            return coSignerConverter.responseV3Converter(response);
+        // Currency must match — same address + amount in a different coin is a different transaction
+        if (tx.getCoinKey() == null || !tx.getCoinKey().equals(order.getCoinKey())) {
+            return false;
         }
-
-        // 5. Verify destination address matches
-        if (!tx.getDestinationAddress().equalsIgnoreCase(order.getDestinationAddress())) {
-            return coSignerConverter.responseV3Converter(response);
+        // Compare every (address, amount, memo) — exactly one for NORMAL, several for UTXO_BATCH_TRANSFER.
+        // The memo decides who is credited on TON / XRP Ledger
+        List<String> actual = new ArrayList<>();
+        for (DestinationAddress d : destinationsOf(tx, memo)) {
+            actual.add(outputKey(d.getAddress(), d.getAmount(), d.getMemo()));
         }
+        List<String> expected = new ArrayList<>();
+        for (OrderOutput o : order.getOutputs()) {
+            expected.add(outputKey(o.getAddress(), o.getAmount(), o.getMemo()));
+        }
+        if (actual.isEmpty() || actual.contains(null) || expected.contains(null)) {
+            return false;   // missing or malformed address / amount
+        }
+        Collections.sort(actual);
+        Collections.sort(expected);
+        return actual.equals(expected);
+    }
 
-        // 6. Check AML risk
-        for (TransactionApproval.Aml aml : tx.getAmlList()) {
-            if ("HIGH".equalsIgnoreCase(aml.getRiskLevel()) || "SEVERE".equalsIgnoreCase(aml.getRiskLevel())) {
-                return coSignerConverter.responseV3Converter(response);
+    // UTXO coins carry destinations in destinationAddressList; account-model coins use destinationAddress + txAmount
+    private List<DestinationAddress> destinationsOf(TransactionApproval tx, String memo) {
+        if (tx.getDestinationAddressList() != null && !tx.getDestinationAddressList().isEmpty()) {
+            return tx.getDestinationAddressList();
+        }
+        if (tx.getDestinationAddress() == null) {
+            return List.of();
+        }
+        DestinationAddress single = new DestinationAddress();
+        single.setAddress(tx.getDestinationAddress());
+        single.setAmount(tx.getTxAmount());
+        single.setMemo(memo);
+        return List.of(single);
+    }
+
+    private String outputKey(String address, String amount, String memo) {
+        if (address == null || address.isEmpty() || amount == null) {
+            return null;
+        }
+        try {
+            // Lower-casing suits EVM (hex) addresses only — compare case-sensitively for base58 / XRP Ledger / TRON / Solana
+            return address.toLowerCase(Locale.ROOT) + "|" + new BigDecimal(amount).stripTrailingZeros().toPlainString()
+                    + "|" + (memo == null ? "" : memo);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    // ---- AML / KYT ----
+
+    enum AmlDecision { PASS, WAIT, REJECT }
+
+    // Source: Safeheron Compliance docs → Compliance Best Practices → KYT Status Handling Guide (PENDING):
+    // "Approval Callback Service returns a non-APPROVE / non-REJECT value ... API Co-Signer retries approval
+    // every 5 seconds with the latest KYT report". The literal "WAIT" is our choice of such a value.
+    private static final String ACTION_WAIT = "WAIT";
+    private static final long AML_WAIT_TIMEOUT_MS = 5 * 60 * 1000L;
+    // Whitelist: only these risk levels may pass; HIGH, SEVERE, UNKNOWN and any unexpected value are rejected
+    private static final Set<String> ALLOWED_RISK_LEVELS = Set.of("LOW", "MEDIUM");
+    // true: reject when the callback carries no KYT data (Co-Signer < 2.1.1). Set false only if you do not use KYT
+    private static final boolean KYT_REQUIRED = true;
+
+    // When this service first saw each pending approval. Multi-instance deployments: use Redis SET NX with a TTL
+    private final ConcurrentHashMap<String, Long> amlWaitStartedAt = new ConcurrentHashMap<>();
+
+    private AmlDecision evaluateAml(String approvalId, TransactionApproval tx) {
+        AmlDecision decision = evaluateAmlState(tx);
+        if (decision != AmlDecision.WAIT) {
+            amlWaitStartedAt.remove(approvalId);
+            return decision;
+        }
+        long startedAt = amlWaitStartedAt.computeIfAbsent(approvalId, k -> System.currentTimeMillis());
+        if (System.currentTimeMillis() - startedAt > AML_WAIT_TIMEOUT_MS) {
+            amlWaitStartedAt.remove(approvalId);
+            log.error("KYT screening not finished after timeout, txKey={}", tx.getTxKey());
+            return AmlDecision.REJECT;   // or route to manual review
+        }
+        return AmlDecision.WAIT;
+    }
+
+    // Whitelist style: anything not explicitly recognised as safe is rejected
+    private AmlDecision evaluateAmlState(TransactionApproval tx) {
+        String state = tx.getAmlScreeningTriggeredState();
+        if (state == null) {
+            log.warn("No KYT data in approval callback (Co-Signer < 2.1.1?), txKey={}", tx.getTxKey());
+            return KYT_REQUIRED ? AmlDecision.REJECT : AmlDecision.PASS;
+        }
+        switch (state) {
+            case "UNTRIGGERED":
+                return AmlDecision.PASS;
+            case "IN_PROGRESS":
+                return AmlDecision.WAIT;
+            case "TRIGGERED":
+                break;
+            default:
+                log.error("Unknown amlScreeningTriggeredState {}, txKey={}", state, tx.getTxKey());
+                return AmlDecision.REJECT;
+        }
+        List<TransactionApproval.Aml> amlList = tx.getAmlList();
+        if (amlList == null || amlList.isEmpty()) {
+            log.error("KYT triggered but amlList is empty — set CALLBACK_INCLUDE_KYT_REPORT=true, txKey={}", tx.getTxKey());
+            return AmlDecision.REJECT;
+        }
+        boolean pending = false;
+        for (TransactionApproval.Aml aml : amlList) {
+            String status = aml.getStatus() == null ? "" : aml.getStatus().trim().toUpperCase(Locale.ROOT);
+            if ("PENDING".equals(status)) {
+                pending = true;
+            } else if ("COMPLETED".equals(status)) {
+                // A completed report without a risk level is treated as UNKNOWN
+                String riskLevel = aml.getRiskLevel() == null ? "UNKNOWN" : aml.getRiskLevel().trim().toUpperCase(Locale.ROOT);
+                if (!ALLOWED_RISK_LEVELS.contains(riskLevel)) {
+                    log.warn("KYT risk {} from {}, txKey={}", riskLevel, aml.getProvider(), tx.getTxKey());
+                    return AmlDecision.REJECT;
+                }
+            } else if (!"SKIPPED".equals(status)) {
+                // FAILED, missing or unknown status → manual handling
+                log.error("KYT status {} from {}, txKey={}", aml.getStatus(), aml.getProvider(), tx.getTxKey());
+                return AmlDecision.REJECT;
             }
         }
-
-        response.setAction("APPROVE");
-        return coSignerConverter.responseV3Converter(response);
+        return pending ? AmlDecision.WAIT : AmlDecision.PASS;
     }
 }
 ```
+
+---
+
+## AML / KYT Handling in the Callback
+
+**Prerequisites:**
+- `amlScreeningTriggeredState` — included from API Co-Signer **2.1.1**.
+- `amlList` — additionally requires `CALLBACK_INCLUDE_KYT_REPORT=true` (restart required). Without it `amlList` is absent — an empty list does **not** mean "no risk".
+
+Follow Safeheron's KYT status handling guide — **never treat "not finished" or "unknown" as "safe"**:
+
+| Condition | Decision |
+|-----------|----------|
+| `amlScreeningTriggeredState` missing | Co-Signer < 2.1.1 — reject if your policy requires KYT (`KYT_REQUIRED`), otherwise pass |
+| `UNTRIGGERED` | No screening for this transaction — AML check passes |
+| `IN_PROGRESS`, or any `amlList[].status = PENDING` | **Wait**: return neither APPROVE nor REJECT; Co-Signer retries every 5s. Measure the wait from the **first callback you received** for this `approvalId` (not `createTime`); after ~5 min (business-dependent) fall back to REJECT / manual review |
+| `TRIGGERED` but `amlList` empty | `CALLBACK_INCLUDE_KYT_REPORT` is off — reject and alert |
+| any `status = FAILED`, or a missing / unknown status or state | Manual handling — reject and alert |
+| `status = SKIPPED` | Manually skipped in Web Console — passes |
+| `status = COMPLETED` | Act on `riskLevel`: `LOW` / `MEDIUM` / `HIGH` / `SEVERE` / `UNKNOWN` (report obtained, no level; a missing level is treated the same). With multiple providers, screening is complete only when **all** are COMPLETED |
+
+> `riskLevel` handling is your own compliance policy. The example only lets `LOW` and `MEDIUM` pass (so `HIGH`, `SEVERE`, `UNKNOWN` and any unexpected value are rejected); adjust `ALLOWED_RISK_LEVELS` per your jurisdiction.
 
 ---
 
@@ -157,16 +370,12 @@ After decryption, `bizContent` is a JSON object:
 
 | `type` | Description |
 |--------|-------------|
-| `TRANSACTION` | Regular outbound transaction approval |
-| `TX_TRANSACTION` | Transaction initiated via API |
-| `CONNECT_TX_SEND` | WalletConnect send transaction |
-| `TX_CONNECT_TX_SEND` | API-initiated WalletConnect send |
-| `TRANSACTION_BATCH_UTXO` | Batch UTXO transaction |
+| `TRANSACTION` | Transaction approval — branch further on `detail.transactionType` |
 | `MPC_SIGN` | MPC raw signing approval |
-| `ETH_SIGN` | Web3 ethSign approval |
-| `PERSONAL_SIGN` | Web3 personalSign approval |
-| `ETH_SIGN_TYPED_DATA` | Web3 signTypedData approval |
-| `ETH_SIGNTRANSACTION` | Web3 ethSignTransaction approval |
+| `WEB3_SIGN` | Web3 signing approval — branch further on `detail.subjectType` (`ETH_SIGN` / `PERSONAL_SIGN` / `ETH_SIGN_TYPED_DATA` / `ETH_SIGNTRANSACTION`) |
+| `CALLBACK_TEST` | Connectivity test from the `cosigner callback-test` CLI; `detail` is empty |
+
+> Legacy values `TX_TRANSACTION`, `CONNECT_TX_SEND`, `TX_CONNECT_TX_SEND`, `TRANSACTION_BATCH_UTXO` (transaction) and `ETH_SIGN`, `PERSONAL_SIGN`, `ETH_SIGN_TYPED_DATA`, `ETH_SIGNTRANSACTION` (Web3) are also recognised by the Safeheron SDK — handle them in the same groups.
 
 ---
 
@@ -179,7 +388,7 @@ After decryption, `bizContent` is a JSON object:
 | `txHash` | String | Transaction hash (if available) |
 | `coinKey` | String | Coin identifier |
 | `txAmount` | String | Transaction amount |
-| `transactionType` | String | Transaction type |
+| `transactionType` | String | Transaction subtype: `NORMAL` / `UTXO_COLLECTION` / `AUTO_SWEEP` / `AUTO_FUEL` / `UTXO_BATCH_TRANSFER` / `GAS_SERVICE_DEPOSIT` — approve each with different rules |
 | `transactionStatus` | String | Current status |
 | `transactionSubStatus` | String | Sub-status |
 | `sourceAccountKey` | String | Sender wallet key |
@@ -194,13 +403,14 @@ After decryption, `bizContent` is a JSON object:
 | `note` | String | Transaction note |
 | `customerExt1` | String | Custom field 1 |
 | `customerExt2` | String | Custom field 2 |
-| `amlLock` | String | AML status: `YES` / `NO` |
-| `amlList` | List\<Aml\> | AML assessments (provider, riskLevel, etc.) |
+| `amlLock` | String | Whether the source address contains AML address(es): `YES` = contains / `NO` = does not contain |
+| `amlScreeningTriggeredState` | String | `IN_PROGRESS` (not yet decided, amlList unavailable) / `TRIGGERED` / `UNTRIGGERED` (amlList empty) |
+| `amlList` | List\<Aml\> | KYT results; only present when Co-Signer ≥ 2.1.1 and `CALLBACK_INCLUDE_KYT_REPORT=true`. Item fields: `provider` (`Elliptic` / `Chainalysis` / `MistTrack`), `status` (`PENDING` / `COMPLETED` / `SKIPPED` / `FAILED`), `riskLevel` (`LOW` / `MEDIUM` / `HIGH` / `SEVERE` / `UNKNOWN`), `timestamp`, `lastUpdateTime` |
 | `createTime` | Long | Unix timestamp (ms) |
 
 ---
 
-## Web3 Payload（type: ETH_SIGN / PERSONAL_SIGN / ETH_SIGN_TYPED_DATA / ETH_SIGNTRANSACTION）
+## Web3 Payload (type: WEB3_SIGN — branch on `subjectType`: ETH_SIGN / PERSONAL_SIGN / ETH_SIGN_TYPED_DATA / ETH_SIGNTRANSACTION)
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -250,46 +460,45 @@ Your callback service must return a **signed response** signed with your Callbac
 
 | Field | Type | Values |
 |-------|------|--------|
-| `action` | String | `APPROVE` or `REJECT` |
+| `action` | String | `APPROVE` or `REJECT`. Any other value leaves the approval pending and Co-Signer retries every 5s (used to wait for KYT results — per the Compliance docs, KYT Status Handling Guide) |
 | `approvalId` | String | Echo back the incoming `approvalId` |
 
 ---
 
 ## Approval Logic Examples
 
-### Allow Only Whitelisted Destinations
+These are **extra rejection conditions** to add inside `decide()` of `CoSignerCallbackController` — never use them on their own as the approval decision (passing one of them must not mean APPROVE).
+
+### Destination Must Be Whitelisted
 
 ```java
-private boolean shouldApprove(String callbackType, TransactionApproval req) {
-    Set<String> txTypes = Set.of("TRANSACTION", "TX_TRANSACTION", "CONNECT_TX_SEND", "TX_CONNECT_TX_SEND", "TRANSACTION_BATCH_UTXO");
-    if (!txTypes.contains(callbackType)) return true;
-    Set<String> allowedAddresses = loadWhitelistedAddresses(req.getCoinKey());
-    return allowedAddresses.contains(req.getDestinationAddress());
+// In decide(), after passesBusinessRules(): if (!isWhitelistedDestination(tx)) return "REJECT";
+private boolean isWhitelistedDestination(TransactionApproval tx) {
+    Set<String> allowedAddresses = loadWhitelistedAddresses(tx.getCoinKey());
+    return tx.getDestinationAddress() != null && allowedAddresses.contains(tx.getDestinationAddress());
 }
 ```
 
 ### Amount Limit per Account
 
 ```java
-private boolean shouldApprove(String callbackType, TransactionApproval req) {
-    BigDecimal amount = new BigDecimal(req.getTxAmount());
-    BigDecimal limit  = getAccountLimit(req.getSourceAccountKey());
-    return amount.compareTo(limit) <= 0;
+// In decide(), after passesBusinessRules(): if (!isWithinAccountLimit(tx)) return "REJECT";
+private boolean isWithinAccountLimit(TransactionApproval tx) {
+    BigDecimal limit = getAccountLimit(tx.getSourceAccountKey(), tx.getCoinKey());  // limit in the coin's own unit
+    if (limit == null || tx.getTxAmount() == null) {
+        return false;
+    }
+    try {
+        return new BigDecimal(tx.getTxAmount()).compareTo(limit) <= 0;
+    } catch (NumberFormatException e) {
+        return false;
+    }
 }
 ```
 
 ### AML Risk Check
 
-```java
-private boolean shouldApprove(String callbackType, TransactionApproval req) {
-    for (TransactionApproval.Aml aml : req.getAmlList()) {
-        if ("HIGH".equalsIgnoreCase(aml.getRiskLevel()) || "SEVERE".equalsIgnoreCase(aml.getRiskLevel())) {
-            return false;
-        }
-    }
-    return true;
-}
-```
+Use `evaluateAml(approvalId, tx)` defined in `CoSignerCallbackController` above (rules: [AML / KYT Handling in the Callback](#aml--kyt-handling-in-the-callback)). Do not just loop over `amlList` checking `riskLevel` — that approves transactions whose screening is still `IN_PROGRESS` / `PENDING`, has `FAILED`, or whose `amlList` is missing.
 
 ---
 
@@ -308,6 +517,20 @@ private boolean shouldApprove(String callbackType, TransactionApproval req) {
 | Config changes | Modify `.env` then run `stop` + `start` to reload                       |
 | Update Callback URL | Web Console update takes effect within 5 min — no Co-Signer restart needed |
 | IP whitelist | Add Co-Signer host IP to the API Key IP whitelist in Console            |
+
+---
+
+## Co-Signer Version History (recent)
+
+| Version | Date | Changes |
+|---------|------|---------|
+| 2.1.5 | 2026-09-21 | Added support for the XRP chain; added `schemaType` field in the TEE signing structure to indicate the format of the data to be signed; upgraded dependencies to strengthen system security |
+| 2.1.4 | 2026-07-14 | Fixed an issue where restarting an inactive Co-Signer caused it to be locked and unable to activate |
+| 2.1.3 | 2026-05-10 | Adjusted MPC Sign structure to improve support for message signing initiated by the Message Signing Tool |
+| 2.1.2 | 2026-04-21 | Fixed incorrect serialization of hex strings in personal sign; fixed ABI parsing failure caused by dependency version inconsistency; fixed validation failure when the target address is empty in contract deployment scenarios |
+| 2.1.1 | 2026-04-08 | Added the AML screening trigger state field in callback notifications; upgraded underlying service framework to improve system stability |
+
+> The 2.1.1 release note spells the field `amlScreeningTriggerState`; the callback field documented in the Approval Callback Service docs and modelled by the SDKs is `amlScreeningTriggeredState`. XRP chain support was added in Co-Signer 2.1.5. Verify the SHA-256 of the downloaded package against the Safeheron API Co-Signer docs.
 
 ---
 
@@ -431,6 +654,6 @@ The Approval Callback Service must:
 
 1. **Verify the Co-Signer identity signature** on every request before processing
 2. **Only accept connections from the Co-Signer host IP** — configure firewall/IP whitelist on the callback service
-3. **Validate `customerRefId`** — reject any callback for a `customerRefId` not found in your DB
-4. **Validate amount and destination** — cross-check against the original withdrawal order
+3. **Apply the rules for each `transactionType`** — for `NORMAL` / `UTXO_BATCH_TRANSFER`, the `customerRefId` must match a pending order and coin, every destination address, amount and memo must match it; system subtypes (`AUTO_SWEEP`, `AUTO_FUEL`, `UTXO_COLLECTION`, `GAS_SERVICE_DEPOSIT`) follow their own rules — see `passesBusinessRules`
+4. **Apply the AML / KYT rules** — see `evaluateAml`
 5. **Respond within 5 seconds** — Co-Signer will time out otherwise (sync server time via NTP)

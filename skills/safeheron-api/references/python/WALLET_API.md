@@ -9,6 +9,7 @@ from safeheron_api_sdk_python.api.account_api import (
     ListAccountRequest,
     OneAccountRequest,
     BatchUpdateAccountTagRequest,
+    BatchUpdateAccountFuelRequest,
     CreateAccountCoinRequest,
     CreateAccountCoinRequestV2,
     ListAccountCoinRequest,
@@ -40,10 +41,10 @@ coin_address_list = resp.get('coinAddressList', [])
 
 | Field | Required | Type | Description |
 |-------|----------|------|-------------|
-| `accountName` | Yes | str | Wallet display name |
+| `accountName` | No | str | Account name, 50 characters max |
 | `customerRefId` | No | str | Merchant unique business ID (max 100 chars). Duplicate submissions with the same ID return the same wallet |
 | `hiddenOnUI` | No | bool | If True, wallet is hidden in Web Console / App |
-| `autoFuel` | No | bool | If True, Gas Station auto-tops up gas when a transaction is initiated. Default: False |
+| `autoFuel` | No | bool | Auto-refuel. If True, the Gas Service automatically supplements the Gas fee for the wallet when a transaction is initiated. Default: False |
 | `accountTag` | No | str | Tag applied at creation. Values: `DEPOSIT`, `NONE`. Required for Auto-Sweep |
 | `coinKeyList` | No | list[str] | Coin keys to add at creation (max 20) |
 
@@ -126,6 +127,25 @@ account_api.batch_update_account_tag(param)
 
 ---
 
+## Batch Set Auto-Fuel
+
+Set `autoFuel` for up to 100 wallets. `True` = the Gas Service automatically supplements the transaction fee (Gas) for the wallet when a transaction is initiated; `False` = it no longer does (see [GAS_API.md](GAS_API.md)).
+
+```python
+param = BatchUpdateAccountFuelRequest()
+param.accountKeyList = ["your-account-key"]   # max 100
+param.autoFuel = True
+
+resp = account_api.batch_update_account_autofuel(param)   # {'result': True} on success
+```
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `accountKeyList` | Yes | list[str] | Account keys, max 100 |
+| `autoFuel` | Yes | bool | Whether Gas Service auto-supplements the Gas fee when a transaction is initiated |
+
+---
+
 ## Add Coin to a Wallet Account (V2 -- Recommended)
 
 Add up to 20 coins in a single call. Adding a token auto-adds its mainnet coin.
@@ -190,6 +210,7 @@ for coin in coins:
 | List accounts | `ListAccountRequest` | `list_accounts(param)` |
 | Get one account | `OneAccountRequest` | `one_accounts(param)` |
 | Batch update tag | `BatchUpdateAccountTagRequest` | `batch_update_account_tag(param)` |
+| Batch set auto-fuel | `BatchUpdateAccountFuelRequest` | `batch_update_account_autofuel(param)` |
 | Add coin V2 | `CreateAccountCoinRequestV2` | `create_account_coin_v2(param)` |
 | Add coin V1 | `CreateAccountCoinRequest` | `create_account_coin(param)` |
 | List coins | `ListAccountCoinRequest` | `list_account_coin(param)` |

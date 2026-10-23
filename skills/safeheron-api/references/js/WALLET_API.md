@@ -30,10 +30,10 @@ const accountKey = resp.accountKey;  // save this -- permanent wallet identifier
 
 | Field | Required | Type | Description |
 |-------|----------|------|-------------|
-| `accountName` | Yes | string | Wallet display name |
+| `accountName` | No | string | Account name, 50 characters max |
 | `customerRefId` | No | string | Merchant unique business ID (max 100 chars). Duplicate submissions with the same ID return the same wallet |
 | `hiddenOnUI` | No | boolean | If true, wallet is hidden in Web Console / App |
-| `autoFuel` | No | boolean | If true, Gas Station auto-tops up gas when a transaction is initiated. Default: false |
+| `autoFuel` | No | boolean | Auto-refuel. If set to true, the Gas Service will automatically supplement the Gas fee for the wallet when a transaction is initiated. Default: false |
 | `accountTag` | No | string | Tag applied at creation. Values: `DEPOSIT`, `NONE`. Required for Auto-Sweep |
 | `coinKeyList` | No | Array\<string\> | Coin keys to add at creation (max 20) |
 
@@ -125,6 +125,27 @@ await accountApi.batchUpdateAccountTag({
 
 ---
 
+## Batch Set Auto-Fuel
+
+Set the `autoFuel` property for a batch of wallet accounts. `true` means the Gas Service will automatically supplement the transaction fee (Gas) for that wallet when a transaction is initiated; `false` means it will no longer do so.
+
+```typescript
+const result = await accountApi.batchUpdateAccountAutofuel({
+  accountKeyList: ['your-account-key'],  // max 100
+  autoFuel: true,
+});
+console.log('Updated:', result.result);
+```
+
+**BatchUpdateAccountFuelRequest Fields:**
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `accountKeyList` | Yes | Array\<string\> | Account key, max is 100 |
+| `autoFuel` | Yes | boolean | If set to true, Gas Service will automatically supplement the transaction fee (Gas) for the wallet when a transaction is initiated (optional in the SDK v1.0.32 TS type — always pass it) |
+
+---
+
 ## Add Coin to a Wallet Account (V2 -- Recommended)
 
 Add up to 20 coins in a single call. Adding a token auto-adds its mainnet coin.
@@ -183,10 +204,11 @@ for (const coin of coins) {
 
 | Operation | Method | Request | Response |
 |-----------|--------|---------|----------|
-| Create account | `createAccount()` | `{ accountName, hiddenOnUI? }` | `{ accountKey, pubKeys, coinAddressList }` |
+| Create account | `createAccount()` | `{ accountName?, hiddenOnUI?, autoFuel?, accountTag?, coinKeyList? }` | `{ accountKey, pubKeys, coinAddressList }` |
 | List accounts | `listAccounts()` | `{ pageSize?, pageNumber? }` | `{ content, totalElements }` |
 | Get one account | `oneAccounts()` | `{ accountKey }` | Account object |
-| Batch update tag | `batchUpdateAccountTag()` | `{ accountKeyList, accountTag }` | void |
+| Batch update tag | `batchUpdateAccountTag()` | `{ accountKeyList, accountTag }` | `{ result }` |
+| Batch set auto-fuel | `batchUpdateAccountAutofuel()` | `{ accountKeyList, autoFuel }` | `{ result }` |
 | Add coin V2 | `createAccountCoinV2()` | `{ accountKey, coinKeyList }` | `{ coinAddressList }` |
 | List coins | `listAccountCoin()` | `{ accountKey }` | Array of coin objects |
 

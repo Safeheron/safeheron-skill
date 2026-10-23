@@ -25,7 +25,7 @@ Wallet Account 1          Wallet Account 2          Wallet Account ...
 |-----------|-----------|---------|
 | `INFLOW` | External -> team wallet | User deposit |
 | `OUTFLOW` | Team wallet -> external | User withdrawal |
-| `INTERNAL_TRANSFER` | Team wallet -> team wallet | Consolidation, gas top-up |
+| `INTERNAL_TRANSFER` | Team wallet -> team wallet | Consolidation, gas top-up (`AUTO_FUEL`), Auto Sweep — never a deposit; only a `NORMAL` one that matches one of your withdrawal orders is a user withdrawal to another in-team address |
 
 ---
 
@@ -70,38 +70,84 @@ Use **Webhook as primary + REST API polling as fallback**. Never rely on only on
 
 ### 3-1. Webhook -- Primary Path
 
-Subscribe to `TRANSACTION_STATUS_CHANGED`. Filter for deposit (inflow) transactions:
+Subscribe to `TRANSACTION_STATUS_CHANGED`. Decide what to do with each transaction through **one** classification function shared by the webhook handler and the polling fallback (3-2), so both paths apply the same rule:
 
 ```go
+// TxAction is what the deposit / withdrawal flow does with a transaction.
+type TxAction int
+
+const (
+    TxIgnore                    TxAction = iota // system movement or ops transfer: never credit
+    TxCreditDeposit                             // NORMAL INFLOW: credit the user who owns the deposit address
+    TxSettleWithdrawalAndCredit                 // NORMAL INTERNAL_TRANSFER that matches one of your withdrawal orders
+)
+
+// classifyTransaction is the ONLY place that decides whether a transaction may credit a user.
+// findWithdrawalOrderByTxKeyOrCustomerRefId is your lookup (placeholder): returns nil when no platform withdrawal order matches.
+func classifyTransaction(txType, direction, txKey, customerRefId string) TxAction {
+    if txType != "NORMAL" {
+        // AUTO_FUEL (Auto Sweep tops up a deposit address with gas -- vault -> vault, INTERNAL_TRANSFER),
+        // AUTO_SWEEP, UTXO_COLLECTION, GAS_SERVICE_DEPOSIT, GAS_SERVICE_FUEL, BOUNCED_TRANSFER, ABNORMAL,
+        // UTXO_BATCH_TRANSFER, ...: system / internal movements, never a user deposit
+        return TxIgnore
+    }
+    switch direction {
+    case "INFLOW":
+        return TxCreditDeposit
+    case "INTERNAL_TRANSFER":
+        if findWithdrawalOrderByTxKeyOrCustomerRefId(txKey, customerRefId) == nil {
+            return TxIgnore // ops transfer (e.g. hot -> cold wallet), not a user deposit
+        }
+        return TxSettleWithdrawalAndCredit
+    default:
+        return TxIgnore // OUTFLOW is handled by the withdrawal flow (section 5), never credited
+    }
+}
+
+// event = decrypted bizContent: {"eventType": ..., "eventDetail": {...}} — transaction fields are under eventDetail
 func processWebhookEvent(event map[string]interface{}) {
     eventType, _ := event["eventType"].(string)
     if eventType != "TRANSACTION_STATUS_CHANGED" {
         return
     }
+    detail, ok := event["eventDetail"].(map[string]interface{})
+    if !ok {
+        log.Printf("ERROR: TRANSACTION_STATUS_CHANGED without eventDetail")
+        return
+    }
 
-    txDirection, _ := event["transactionDirection"].(string)
-    txType, _ := event["transactionType"].(string)
-    status, _ := event["transactionStatus"].(string)
+    txDirection, _ := detail["transactionDirection"].(string)
+    txType, _ := detail["transactionType"].(string)
+    txKey, _ := detail["txKey"].(string)
+    customerRefId, _ := detail["customerRefId"].(string)
 
-    if txType == "NORMAL" && txDirection == "INFLOW" {
-        handleDepositStatusChange(event)
+    switch classifyTransaction(txType, txDirection, txKey, customerRefId) {
+    case TxCreditDeposit:
+        handleDepositStatusChange(detail) // credits on COMPLETED only, idempotent by txKey
+    case TxSettleWithdrawalAndCredit:
+        // A user withdrawing to ANOTHER user's deposit address on your platform is INTERNAL_TRANSFER, not
+        // OUTFLOW + INFLOW: settle the matched withdrawal order, and credit the receiver only if the destination
+        // is a user deposit address on your platform (idempotent by txKey)
+        handleInternalTransfer(detail)
     }
 }
 ```
+
+**Which address was credited:** for UTXO coins (e.g. BTC) use `destinationAddressList[]` (`address` / `amount`) — `destinationAddress` may be empty; for account-model coins use `destinationAddress` + `txAmount`.
 
 **Status progression for inflow transactions:**
 
 | Status | Meaning | Action |
 |--------|---------|--------|
-| `BROADCASTING` | On-chain, 0 confirmations | Optionally show "pending" |
+| `BROADCASTING` | Being broadcast, 0 confirmations — for deposits, only Bitcoin network transactions have this state | Optionally show "pending" |
 | `CONFIRMING` | >=1 confirmation | Optionally show confirmation count |
 | `COMPLETED` | >=N confirmations | **Credit user account** |
 | `FAILED` | Failed on-chain | No credit |
 
 **Critical rules:**
-- Return HTTP 200 **immediately** -- put work on a goroutine or channel
+- Verify the signature and **durably** store the event (DB inbox / durable MQ), then ack `{"code":"200","message":"SUCCESS"}`; process asynchronously -- see [WEBHOOK.md](WEBHOOK.md). Never ack after only an in-memory enqueue.
 - **Never roll back status** -- if DB already has `COMPLETED`, ignore a late `CONFIRMING`
-- Implement **idempotency by `txKey`**
+- Implement **idempotency by `txKey`** — write the idempotency marker and the credit in the **same DB transaction**
 
 **Anti-dust attack:** Configure minimum deposit amounts and ignore events below the threshold.
 
@@ -122,8 +168,15 @@ func pollTransactions(transactionApi api.TransactionApi, lastPolledMs int64) {
     }
 
     for _, tx := range txList {
-        if tx.TransactionDirection == "INFLOW" && tx.TransactionStatus == "COMPLETED" {
-            creditUserIfNotAlready(tx.TxKey, tx)
+        if tx.TransactionStatus != "COMPLETED" {
+            continue
+        }
+        // Same rule as the webhook path -- AUTO_FUEL / AUTO_SWEEP / ops transfers are never credited
+        switch classifyTransaction(tx.TransactionType, tx.TransactionDirection, tx.TxKey, tx.CustomerRefId) {
+        case TxCreditDeposit:
+            creditUserIfNotAlready(tx.TxKey, tx) // same txKey idempotency marker as the webhook path
+        case TxSettleWithdrawalAndCredit:
+            settleInternalTransferIfNotAlready(tx.TxKey, tx)
         }
     }
 }
@@ -227,6 +280,12 @@ func handleWithdrawalWebhook(event map[string]interface{}) {
         return
     }
 
+    // Speed-up: the original tx ends FAILED while its replacement may still complete — keep the order open and let the replacement decide
+    // (check BEFORE moving the order to a terminal state, otherwise the replacement's COMPLETED event is discarded)
+    if (newStatus == "FAILED" || newStatus == "REJECTED" || newStatus == "CANCELLED") && hasActiveReplacement(order, txKey) {
+        return
+    }
+
     order.Status = newStatus
     saveOrder(order)
 
@@ -268,7 +327,9 @@ See [POLICY_STRATEGY.md](POLICY_STRATEGY.md) for the complete configuration refe
 
 ```go
 req := api.RecreateTransactionRequest{
-    TxKey:      stuckTxKey,
+    TxKey:      stuckTxKey,    // required
+    TxHash:     stuckTxHash,   // required — hash of the stuck transaction
+    CoinKey:    stuckCoinKey,  // required
     TxFeeLevel: "HIGH",
 }
 
@@ -281,8 +342,8 @@ newTxKey := resp.TxKey
 // Track the speed-up tx via newTxKey
 ```
 
-Chains that support speed-up: all EVM chains, BTC, BCH, DASH, LTC, DOGE, FIL, Aptos, CFX.
-Chains that do NOT support speed-up: NEAR, SUI, TRON, SOL, TON.
+Chains that support speed-up: EVM chains (e.g. ETH, ETC, BSC, MATIC); UTXO chains — Bitcoin and Dogecoin (RBF and CPFP) and other UTXO chains supporting CPFP; FileCoin; Aptos; XRP Ledger.
+Chains not listed in the published docs as supported do not support speed-up (e.g. NEAR, SUI, TRON, SOL, TON).
 
 ---
 
@@ -290,18 +351,12 @@ Chains that do NOT support speed-up: NEAR, SUI, TRON, SOL, TON.
 
 ### At withdrawal time:
 - Run destination address through your internal risk engine
-- Optionally use KYA address screening via `ComplianceApi` -- see [COMPLIANCE_API.md](COMPLIANCE_API.md)
+- Screen the destination address with **KYA** (`ComplianceApi.KyaScreeningCreate` → poll `KyaScreeningOne`) -- see [COMPLIANCE_API.md](COMPLIANCE_API.md). Do **not** use the deprecated AML Checker (`/v1/tools/aml-checker/*`, `ToolsApi.AmlCheckerRequest/AmlCheckerRetrieves`), and `CheckAml` in `CheckCoinAddress` is not a substitute for KYA
+- Reject withdrawals to `HIGH` / `SEVERE` (and, by default, `UNKNOWN`) risk addresses before they reach Safeheron
 
 ### In the Approval Callback Service:
 
-```go
-func checkAmlRisk(amlList []interface{}) bool {
-    for _, aml := range amlList {
-        amlMap, _ := aml.(map[string]interface{})
-        if riskLevel, _ := amlMap["riskLevel"].(string); riskLevel == "HIGH" {
-            return false // reject
-        }
-    }
-    return true // approve
-}
-```
+Use `evaluateAml(approvalId, tx)` in the COSIGNER.md handler ([COSIGNER.md](COSIGNER.md#aml--kyt-handling-in-the-callback)):
+- Only `riskLevel` `LOW` / `MEDIUM` pass by default — `HIGH`, `SEVERE`, `UNKNOWN` and unexpected values are rejected
+- While `amlScreeningTriggeredState = IN_PROGRESS` or any `status = PENDING`, return neither APPROVE nor REJECT (Co-Signer retries every 5s); fall back to reject / manual review ~5 min after the first callback for that approval
+- `status = FAILED`, a missing / unknown status, or `TRIGGERED` with an empty `amlList` → reject and alert

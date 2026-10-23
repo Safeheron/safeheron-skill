@@ -194,7 +194,7 @@ After `SIGN_COMPLETED`:
 sig := resp.MessageHash.SigList[0].Sig
 
 // For personalSign and ethSignTypedData:
-sig := resp.Message.Sig.Sig
+msgSig := resp.Message.Sig.Sig
 
 // For ethSignTransaction:
 signedTx := resp.Transaction.SignedTransaction // hex-encoded signed tx
@@ -208,10 +208,18 @@ txHash   := resp.Transaction.TxHash
 ```go
 import (
     "context"
+    "encoding/hex"
+    "log"
+
     "github.com/ethereum/go-ethereum/common/hexutil"
     "github.com/ethereum/go-ethereum/core/types"
     "github.com/ethereum/go-ethereum/ethclient"
 )
+
+client, err := ethclient.Dial(rpcURL) // your Ethereum JSON-RPC endpoint
+if err != nil {
+    log.Fatal(err)
+}
 
 // For ethSign: assemble with raw transaction
 sigByte, _ := hexutil.Decode("0x" + sig)

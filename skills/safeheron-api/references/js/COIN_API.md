@@ -68,10 +68,16 @@ for (const coin of coins) {
 
 Use before adding to whitelist or sending funds:
 
+> `checkAml` / `amlValid` only checks Safeheron's AML blacklist. For real address risk screening (risk levels incl. `SEVERE`), use **KYA** — see [COMPLIANCE_API.md](COMPLIANCE_API.md). Do not use the deprecated AML Checker (`/v1/tools/aml-checker/*`).
+
 ```typescript
 const resp = await coinApi.checkCoinAddress({
   coinKey: 'ETHEREUM_ETH',
   address: '0xAbCd...',
+  checkAddressValid: true,  // without it, addressValid is not checked
+  checkAml: true,           // without it, amlValid is always true
+  // checkContract: true,
+  // checkSolanaOwnerAddress: true,  // Solana: is this an owner (wallet) address?
 });
 
 if (!resp.addressValid) {
@@ -98,8 +104,9 @@ if (!resp.amlValid) {
 | Field | Type | Description |
 |-------|------|-------------|
 | `addressValid` | boolean | Valid address format |
-| `contract` | boolean | Contract address |
-| `amlValid` | boolean | Subject to risk control limitations |
+| `contract` | boolean | Contract address: `true` contract / `false` non-contract |
+| `amlValid` | boolean | Subject to risk control limitations. `true`: AML valid address; `false`: AML blacklisted address |
+| `solanaOwnerAddress` | boolean | `true`: Solana owner address; `false`: not a Solana owner address (returned when `checkSolanaOwnerAddress` is set) |
 
 ---
 

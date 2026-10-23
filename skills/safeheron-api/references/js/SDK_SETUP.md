@@ -45,7 +45,7 @@ const config: SafeheronConfig = {
 | `apiKey` | `string` | API Key from Safeheron Console |
 | `rsaPrivateKey` | `string` | Your RSA private key, PEM string or `file:/path/to/key.pem` |
 | `safeheronRsaPublicKey` | `string` | Safeheron platform public key, PEM string or `file:/path/to/key.pem` |
-| `requestTimeout` | `number` | Request timeout in milliseconds |
+| `requestTimeout` | `number` | Request timeout in milliseconds — **required** by the SDK v1.0.32 `SafeheronConfig` type (omitting it fails type-checking and leaves requests without a timeout) |
 
 ---
 

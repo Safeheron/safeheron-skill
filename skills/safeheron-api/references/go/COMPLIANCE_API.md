@@ -8,6 +8,10 @@ Two main integration points:
 1. **KYT** — retrieve AML risk reports for completed transactions (`KytReport`).
 2. **KYA** — proactively screen a blockchain address before transacting (`KyaScreeningCreate` / `KyaScreeningOne` / `KyaScreeningOrderOne`).
 
+> ⚠️ **Deprecated — do not use:** the AML Checker APIs (`/v1/tools/aml-checker/request`, `/v1/tools/aml-checker/retrieves`, i.e. `ToolsApi.AmlCheckerRequest` / `AmlCheckerRetrieves`) are scheduled for discontinuation. Always use the KYA APIs above for address screening — they support more networks and multiple providers (Elliptic, Chainalysis, MistTrack). The `CheckAml` flag of `CheckCoinAddress` only checks Safeheron's AML blacklist and is not a substitute for KYA.
+>
+> **Risk levels** (`riskLevel`, used by KYT, KYA and the Co-Signer callback): `LOW` / `MEDIUM` / `HIGH` / `SEVERE` / `UNKNOWN`. Always handle `SEVERE` — it is the highest level, above `HIGH`.
+
 ---
 
 ## Imports
@@ -96,8 +100,8 @@ Initiate an address screening against one or more AML providers in parallel:
 ```go
 req := api.KyaScreeningRequest{
     Address:   "0xRecipientAddress",
-    ChainType: "ETH",
-    // Network: "ethereum",  // required when Providers includes MistTrack
+    ChainType: "EVM", // published example value; valid values via KyaSupportedNetworks()
+    // Network: "Ethereum", // required when Providers includes MistTrack
     Providers: []string{"Elliptic", "Chainalysis"},
 }
 
@@ -244,18 +248,18 @@ for _, n := range networks {
 
 ---
 
-## AML Lock Behavior
+## failOnAml Behavior (destination AML check)
 
 When `FailOnAml=true` (default) in `CreateTransactionsRequest`, Safeheron will:
 1. Automatically run AML checks on the destination address.
-2. Block the transaction if the address scores high-risk (`AmlLock = "YES"`).
+2. Prohibit the transaction if the destination address presents compliance risks.
 
 To disable AML blocking (not recommended for production):
 
 ```go
 b := false
 req := api.CreateTransactionsRequest{
-    FailOnAml: &b, // disable AML lock -- use with caution
+    FailOnAml: &b, // disable the failOnAml destination check -- use with caution
     // ... other fields
 }
 ```
@@ -275,7 +279,7 @@ if err := transactionApi.OneTransactions(oneReq, &tx); err != nil {
 for _, aml := range tx.AmlList {
     fmt.Printf("%s risk: %s\n", aml.Provider, aml.RiskLevel)
 }
-fmt.Printf("AML locked: %s\n", tx.AmlLock) // "YES" or "NO"
+fmt.Printf("Source address contains AML address(es): %s\n", tx.AmlLock) // "YES" or "NO"
 ```
 
 ---
@@ -288,7 +292,7 @@ Use KYA screening to check a destination address before initiating any outbound 
 // Step 1: Create KYA screening
 createReq := api.KyaScreeningRequest{
     Address:   destinationAddress,
-    ChainType: "ETH",
+    ChainType: "EVM", // published example value; valid values via KyaSupportedNetworks()
     Providers: []string{"Chainalysis"},
 }
 var created api.KyaScreeningCreateResponse
@@ -309,14 +313,27 @@ for i := 0; i < 30; i++ {
     time.Sleep(2 * time.Second)
 }
 
-// Step 3: Handle each riskLevel according to your own business logic
-for _, order := range result.Orders {
-    riskLevel := order.RiskLevel
-    // Decide what to do based on riskLevel (LOW / MEDIUM / HIGH / SEVERE / UNKNOWN).
-    // For example, block HIGH/SEVERE, require manual review for MEDIUM, allow LOW, etc.
-    // Implement the subsequent business logic (block, alert, proceed with transaction, ...) yourself.
-    _ = riskLevel
+// Step 3: Fail closed — an unfinished, empty or failed screening is NOT a pass
+if result.Status != "FINISHED" {
+    panic(fmt.Sprintf("KYA screening not finished for %s — route to manual review", destinationAddress))
 }
+if len(result.Orders) == 0 {
+    panic(fmt.Sprintf("KYA screening returned no provider result for %s", destinationAddress))
+}
+// Whitelist: only LOW / MEDIUM pass (adjust per your policy); HIGH, SEVERE, UNKNOWN, a missing level or FAILED are blocked
+allowedRiskLevels := map[string]bool{"LOW": true, "MEDIUM": true}
+for _, order := range result.Orders {
+    if order.Status == "SKIPPED" {
+        continue // manually skipped in Web Console
+    }
+    if order.Status != "COMPLETED" {
+        panic(fmt.Sprintf("KYA screening %s (%s) — route to manual review", order.Status, order.Provider))
+    }
+    if !allowedRiskLevels[order.RiskLevel] {
+        panic(fmt.Sprintf("AML check failed: %s is %q risk", destinationAddress, order.RiskLevel))
+    }
+}
+// All provider results acceptable — proceed with the transfer
 ```
 
 ---

@@ -8,6 +8,10 @@ Two main integration points:
 1. **KYT** — retrieve AML risk reports for completed transactions (`kytReport`).
 2. **KYA** — proactively screen a blockchain address before transacting (`createKyaScreening` / `kyaScreeningOne` / `kyaScreeningOrderOne`).
 
+> ⚠️ **Deprecated — do not use:** the AML Checker APIs (`/v1/tools/aml-checker/request`, `/v1/tools/aml-checker/retrieves`, i.e. `toolsApi.amlCheckerRequest` / `amlCheckerRetrieves`) are scheduled for discontinuation. Always use the KYA APIs above for address screening — they support more networks and multiple providers (Elliptic, Chainalysis, MistTrack). The `checkAml` flag of `checkCoinAddress` only checks Safeheron's AML blacklist and is not a substitute for KYA.
+>
+> **Risk levels** (`riskLevel`, used by KYT, KYA and the Co-Signer callback): `LOW` / `MEDIUM` / `HIGH` / `SEVERE` / `UNKNOWN`. Always handle `SEVERE` — it is the highest level, above `HIGH`.
+
 ---
 
 ## Imports
@@ -88,8 +92,8 @@ Initiate an address screening against one or more AML providers in parallel:
 ```typescript
 const resp = await complianceApi.createKyaScreening({
   address: '0xRecipientAddress',
-  chainType: 'ETH',
-  // network: 'ethereum',  // required when providers includes MistTrack
+  chainType: 'EVM',        // published example value; see kyaSupportedNetworks()
+  network: 'Ethereum',     // required when providers includes MistTrack
   providers: ['Elliptic', 'Chainalysis'],
 });
 
@@ -217,22 +221,22 @@ for (const n of networks) {
 
 ---
 
-## AML Lock Behavior
+## failOnAml Behavior (destination AML check)
 
 When `failOnAml=true` (default) in `createTransactions()`, Safeheron will:
 1. Automatically run AML checks on the destination address.
-2. Block the transaction if the address scores high-risk (`amlLock = "YES"`).
+2. Prohibit the transaction if the destination address presents compliance risks.
 
 To disable AML blocking (not recommended for production):
 
 ```typescript
 await transactionApi.createTransactions({
   // ...
-  failOnAml: false,  // disable AML lock -- use with caution
+  failOnAml: false,  // disable the failOnAml destination check -- use with caution
 });
 ```
 
-The transaction response `amlLock` field indicates `"YES"` or `"NO"`.
+Separately, the transaction response field `amlLock` tells whether the **source** address contains AML address(es) (`"YES"` / `"NO"`) — it is not the result of the `failOnAml` destination check.
 
 ---
 
@@ -245,7 +249,7 @@ const tx = await transactionApi.oneTransactions({ txKey });
 for (const aml of tx.amlList) {
   console.log(`${aml.provider} risk: ${aml.riskLevel}`);
 }
-console.log('AML locked:', tx.amlLock);  // "YES" or "NO"
+console.log('Source address contains AML address(es):', tx.amlLock);  // "YES" or "NO"
 ```
 
 ---
@@ -255,14 +259,15 @@ console.log('AML locked:', tx.amlLock);  // "YES" or "NO"
 Use KYA screening to check a destination address before initiating any outbound transfer:
 
 ```typescript
-// Step 1: Create KYA screening
+// Step 1: Create KYA screening (chainType / network values: see kyaSupportedNetworks())
 const created = await complianceApi.createKyaScreening({
   address: destinationAddress,
-  chainType: 'ETH',
+  chainType: 'EVM',
+  network: 'Ethereum',
   providers: ['Chainalysis'],
 });
 
-// Step 2: Poll until FINISHED
+// Step 2: Poll until FINISHED (bounded)
 let result: any;
 for (let i = 0; i < 30; i++) {
   result = await complianceApi.kyaScreeningOne({ screenId: created.screenId });
@@ -270,13 +275,27 @@ for (let i = 0; i < 30; i++) {
   await new Promise(resolve => setTimeout(resolve, 2000));
 }
 
-// Step 3: Handle each riskLevel according to your own business logic
-for (const order of result.orders) {
-  const riskLevel = order.riskLevel;
-  // Decide what to do based on riskLevel (LOW / MEDIUM / HIGH / SEVERE / UNKNOWN).
-  // For example, block HIGH/SEVERE, require manual review for MEDIUM, allow LOW, etc.
-  // Implement the subsequent business logic (block, alert, proceed with transaction, ...) yourself.
+// Step 3: Fail closed — an unfinished, empty or failed screening is NOT a pass
+if (result?.status !== 'FINISHED') {
+  throw new Error(`KYA screening not finished for ${destinationAddress}, route to manual review`);
 }
+if (!Array.isArray(result.orders) || result.orders.length === 0) {
+  throw new Error(`KYA screening returned no provider result for ${destinationAddress}`);
+}
+// Whitelist: only LOW / MEDIUM pass (adjust per your policy); HIGH, SEVERE, UNKNOWN, a missing level or FAILED are blocked
+const allowedRiskLevels = new Set(['LOW', 'MEDIUM']);
+for (const order of result.orders) {
+  if (order.status === 'SKIPPED') {
+    continue;   // manually skipped in Web Console
+  }
+  if (order.status !== 'COMPLETED') {
+    throw new Error(`KYA screening ${order.status} (${order.provider}), route to manual review`);
+  }
+  if (!allowedRiskLevels.has(order.riskLevel)) {
+    throw new Error(`AML check failed: ${destinationAddress} is ${order.riskLevel} risk`);
+  }
+}
+// All checks passed — proceed with the transaction
 ```
 
 ---

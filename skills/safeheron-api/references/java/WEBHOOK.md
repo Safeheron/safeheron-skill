@@ -52,16 +52,25 @@ public class SafeheronWebhookConfig {
 }
 ```
 
-### Step 2 — Webhook Controller
+### Step 2 — Webhook Controller (durable inbox, then ack)
+
+> Ack **only after the verified event is durably stored** (a DB inbox table with a unique key, or a durable MQ).
+> In-memory queues and `@Async` hand-offs lose events on a crash, and `TOKEN_BLACKLIST_ADDRESS_HIT`
+> **cannot be re-pushed** by `resendFailed` (see "Re-push API" below).
+> `WebhookInbox` is a placeholder for your own repository: `saveIfAbsent` inserts a row keyed by `eventKey`
+> (a duplicate delivery hits the unique key and is simply acked again).
 
 ```java
+import com.safeheron.client.exception.SafeheronException;
 import com.safeheron.client.webhook.WebHook;
 import com.safeheron.client.webhook.WebHookBizContent;
 import com.safeheron.client.webhook.WebHookResponse;
 import com.safeheron.client.webhook.WebhookConverter;
-import com.safeheron.client.webhook.MPCSignParam;
-import com.safeheron.client.webhook.TransactionParam;
-import com.safeheron.client.webhook.Web3SignParam;
+import org.springframework.http.ResponseEntity;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.HexFormat;
 
 @Slf4j
 @RestController
@@ -73,8 +82,11 @@ public class WebhookController {
     @Resource
     private WebhookConverter webhookConverter;
 
+    @Resource
+    private WebhookInbox webhookInbox;   // your DB inbox repository (placeholder)
+
     @PostMapping("/safeheron/webhook")
-    public WebHookResponse handleWebhook(@RequestBody String rawBody) {
+    public ResponseEntity<WebHookResponse> handleWebhook(@RequestBody String rawBody) {
         try {
             WebHook param = objectMapper.readValue(rawBody, WebHook.class);
 
@@ -82,38 +94,95 @@ public class WebhookController {
             //   1. Verifies RSA signature — throws SafeheronException if invalid
             //   2. Decrypts AES key using your RSA private key
             //   3. Decrypts bizContent
-            //   4. Deserializes eventDetail to the correct concrete type
+            //   4. Deserializes eventDetail to a concrete type ONLY for TRANSACTION_*, MPC_SIGN_* and WEB3_SIGN_* events.
+            //      For other events (WHITELIST_*, AML_KYT_ALERT, GAS_BALANCE_WARNING, ...) eventDetail stays a raw Map
             WebHookBizContent content = webhookConverter.convert(param);
 
-            // Route by eventType — offload to async queue in production
-            switch (content.getEventType()) {
-                case "TRANSACTION_CREATED":
-                case "TRANSACTION_CUSTOMIZED_CONFIRMING":
-                case "TRANSACTION_STATUS_CHANGED":
-                    TransactionParam tx = (TransactionParam) content.getEventDetail();
-                    // handle transaction
-                    break;
-                case "MPC_SIGN_CREATED":
-                case "MPC_SIGN_STATUS_CHANGED":
-                    MPCSignParam mpc = (MPCSignParam) content.getEventDetail();
-                    // handle MPC sign
-                    break;
-                case "WEB3_SIGN_CREATED":
-                case "WEB3_SIGN_STATUS_CHANGED":
-                    Web3SignParam web3 = (Web3SignParam) content.getEventDetail();
-                    // handle Web3 sign
-                    break;
-            }
-
+            // Durably store the verified event BEFORE acking; processing happens in WebhookInboxWorker
+            webhookInbox.saveIfAbsent(eventKey(content), content.getEventType(), objectMapper.writeValueAsString(content));
+        } catch (SafeheronException e) {
+            // Signature verification failed — never ack; the event is not trusted
+            log.error("Webhook signature verification FAILED — possible tampering", e);
+            return ResponseEntity.status(401).build();
         } catch (Exception e) {
+            // Internal error (decrypt / parse / store) — a non-SUCCESS response makes Safeheron retry
+            // (30s, 1m, 5m, 1h, 12h, 24h); after that, recover via re-push or REST polling
             log.error("Webhook processing error", e);
+            return ResponseEntity.status(500).build();
         }
 
-        // Always respond HTTP 200 immediately — never block
+        // Body per docs: {"code":"200","message":"SUCCESS"}; anything else is treated as a failed delivery and retried
         WebHookResponse response = new WebHookResponse();
         response.setCode("200");
         response.setMessage("SUCCESS");
-        return response;
+        return ResponseEntity.ok(response);
+    }
+
+    // The same event re-delivered has the same eventType + eventDetail, hence the same key
+    private String eventKey(WebHookBizContent content) throws Exception {
+        String material = content.getEventType() + objectMapper.writeValueAsString(content.getEventDetail());
+        byte[] hash = MessageDigest.getInstance("SHA-256").digest(material.getBytes(StandardCharsets.UTF_8));
+        return HexFormat.of().formatHex(hash);
+    }
+}
+```
+
+### Step 3 — Inbox Worker (business processing)
+
+Run it from a scheduler or MQ consumer in a **separate bean** (so Spring's `@Transactional` proxy applies).
+Business side effects and marking the inbox row `DONE` are committed in **one** DB transaction; if processing
+throws, the row stays `PENDING` and is retried. Never "mark processed and commit, then do the work".
+
+```java
+import com.safeheron.client.webhook.MPCSignParam;
+import com.safeheron.client.webhook.TransactionParam;
+import com.safeheron.client.webhook.WebHookBizContent;
+import com.safeheron.client.webhook.Web3SignParam;
+import com.fasterxml.jackson.core.type.TypeReference;
+
+import java.util.Map;
+
+@Slf4j
+@Component
+public class WebhookInboxWorker {
+
+    @Resource
+    private ObjectMapper objectMapper;
+
+    @Resource
+    private WebhookInbox webhookInbox;
+
+    @Transactional
+    public void process(WebhookInboxRow row) throws Exception {
+        WebHookBizContent content = objectMapper.readValue(row.getPayload(), WebHookBizContent.class);
+        // After the JSON round-trip eventDetail is a Map — convert it to the typed class
+        switch (content.getEventType()) {
+            case "TRANSACTION_CREATED":
+            case "TRANSACTION_CUSTOMIZED_CONFIRMING":
+            case "TRANSACTION_STATUS_CHANGED":
+                TransactionParam tx = objectMapper.convertValue(content.getEventDetail(), TransactionParam.class);
+                // handle transaction (UTXO coins: read tx.getDestinationAddressList(), not only destinationAddress)
+                break;
+            case "MPC_SIGN_CREATED":
+            case "MPC_SIGN_STATUS_CHANGED":
+                MPCSignParam mpc = objectMapper.convertValue(content.getEventDetail(), MPCSignParam.class);
+                // handle MPC sign
+                break;
+            case "WEB3_SIGN_CREATED":
+            case "WEB3_SIGN_STATUS_CHANGED":
+                Web3SignParam web3 = objectMapper.convertValue(content.getEventDetail(), Web3SignParam.class);
+                // handle Web3 sign
+                break;
+            case "TOKEN_BLACKLIST_ADDRESS_HIT":
+                // SDK 1.0.15 has no typed class for this event — keep it as a Map
+                Map<String, Object> frozen = objectMapper.convertValue(
+                        content.getEventDetail(), new TypeReference<Map<String, Object>>() {});
+                // e.g. alert ops and stop using frozen.get("address") for frozen.get("coinKey")
+                break;
+            default:
+                log.info("Unhandled webhook event type {}", content.getEventType());
+        }
+        webhookInbox.markDone(row.getId());   // same transaction as the business writes above
     }
 }
 ```
@@ -150,7 +219,7 @@ public class WebhookController {
 | `completedTime` | Long | Unix timestamp (ms) of completion |
 | `customerExt1` | String | Custom field 1 |
 | `customerExt2` | String | Custom field 2 |
-| `amlLock` | String | AML status: `YES` / `NO` |
+| `amlLock` | String | Whether the source address contains AML address(es): `YES` = contains / `NO` = does not contain |
 
 ---
 
@@ -214,6 +283,25 @@ public class WebhookController {
 | `NO_MATCHING_TRANSACTION_POLICY` | Transaction has no matching approval policy |
 | `GAS_BALANCE_WARNING` | Gas station balance below threshold |
 | `AML_KYT_ALERT` | KYT Alert Notification |
+| `TOKEN_BLACKLIST_ADDRESS_HIT` | An address in your team was added to a token issuer's blacklist (e.g. Tether) — verify and handle the affected assets |
+
+### TOKEN_BLACKLIST_ADDRESS_HIT eventDetail (TokenBlackListAddressParam)
+
+> Not modelled in SDK 1.0.15 — map `eventDetail` yourself (e.g. `objectMapper.convertValue(...)` into your own class or a `Map`).
+
+| Parameters | Type | Description |
+|------------|------|-------------|
+| `blockChain` | string | Blockchain |
+| `contract` | string | Contract address |
+| `address` | string | Address |
+| `workspaceKey` | string | Workspace Key, the only workspace identifier |
+| `workspaceKeyName` | string | Workspace Name |
+| `accountKey` | string | Account Key, the only account identifier |
+| `accountName` | string | Account name |
+| `coinKey` | string | Coin key |
+| `issuer` | string | Issuer |
+| `lastTxHash` | string | Transaction hash |
+| `lastUpdateTime` | int64 | Last update time (UNIX millisecond timestamp) |
 
 ---
 
@@ -257,8 +345,10 @@ failedReq.setEndTime(System.currentTimeMillis());
 MessagesCountResponse result = ServiceExecutor.execute(webhookApi.resendFailed(failedReq));
 ```
 
-Safeheron automatic retry schedule on non-200 response:
-`30s → 1m → 5m → 1h → 12h → 24h` (7 total attempts, then stops)
+> `resendFailed` supports these event types (per the published docs): `TRANSACTION_CREATED`, `TRANSACTION_STATUS_CHANGED`, `MPC_SIGN_CREATED`, `MPC_SIGN_STATUS_CHANGED`, `WEB3_SIGN_CREATED`, `WEB3_SIGN_STATUS_CHANGED`, `ILLEGAL_IP_REQUEST`, `NO_MATCHING_TRANSACTION_POLICY`, `WHITELIST_ADDED`, `WHITELIST_UPDATED`, `WHITELIST_REMOVED`, `GAS_BALANCE_WARNING`, `AML_KYT_ALERT`. `TOKEN_BLACKLIST_ADDRESS_HIT` is **not** supported and cannot be re-pushed — store every event durably before acking.
+
+Safeheron automatic retry schedule on a non-200 / malformed response: failed deliveries are retried 6 times at
+`30s → 1m → 5m → 1h → 12h → 24h`, then stop.
 
 ---
 
@@ -292,8 +382,8 @@ Every webhook payload **must be signature-verified** before any business logic r
 
 ```java
 @PostMapping("/safeheron/webhook")
-public ResponseEntity<String> handleWebhook(@RequestBody String rawBody,
-                                             HttpServletRequest httpReq) {
+public ResponseEntity<WebHookResponse> handleWebhook(@RequestBody String rawBody,
+                                                      HttpServletRequest httpReq) {
     // Step 0: IP whitelist check — only accept from Safeheron egress IPs
     String clientIp = httpReq.getRemoteAddr();
     if (!SAFEHERON_EGRESS_IPS.contains(clientIp)) {
@@ -305,26 +395,36 @@ public ResponseEntity<String> handleWebhook(@RequestBody String rawBody,
         WebHook param = mapper.readValue(rawBody, WebHook.class);
 
         // convert() atomically verifies RSA signature + decrypts bizContent.
-        // Throws SafeheronException if signature verification fails — do NOT catch separately.
+        // Throws SafeheronException if signature verification fails.
         WebHookBizContent resp = webhookConverter.convert(param);
 
-        // Signature verified — enqueue for async processing
-        eventQueue.offer(resp);
+        // Signature verified — store durably (DB inbox with a unique key, or a durable MQ) BEFORE acking.
+        // In-memory queues lose events on a crash; TOKEN_BLACKLIST_ADDRESS_HIT cannot be re-pushed by resendFailed.
+        webhookInbox.saveIfAbsent(eventKey(resp), resp.getEventType(), mapper.writeValueAsString(resp));  // eventKey(): see Step 2
 
     } catch (SafeheronException e) {
-        // Signature verification failed — reject silently (return 200 to avoid retry storms)
-        log.error("Webhook signature verification FAILED — possible tampering: {}", e.getMessage());
+        // Signature verification failed — never ack; the event is not trusted
+        log.error("Webhook signature verification FAILED — possible tampering", e);
+        return ResponseEntity.status(401).build();
     } catch (Exception e) {
+        // Internal error (decrypt / parse / store) — a non-SUCCESS response makes Safeheron retry
+        // (30s, 1m, 5m, 1h, 12h, 24h); after that, recover via re-push or REST polling
         log.error("Webhook error", e);
+        return ResponseEntity.status(500).build();
     }
 
-    return ResponseEntity.ok("OK");  // always 200 — never block Safeheron
+    // Ack ONLY after the event is verified and durably stored.
+    // Body per docs: {"code":"200","message":"SUCCESS"}; anything else is treated as a failed delivery and retried
+    WebHookResponse ack = new WebHookResponse();
+    ack.setCode("200");
+    ack.setMessage("SUCCESS");
+    return ResponseEntity.ok(ack);
 }
 ```
 
 ### 2. IP Whitelist — Only Accept Safeheron's Egress IPs
 
-Configure your webhook server to **only accept connections from**:
+Configure your webhook server to **only accept connections from** (not listed in the published API reference — confirm the current list with Safeheron Support):
 - `18.162.105.64`
 - `18.167.22.59`
 - `18.167.21.182`
@@ -350,7 +450,7 @@ private boolean shouldUpdateStatus(String currentStatus, String newStatus) {
 
 ### 4. Idempotency by `txKey`
 
-Safeheron may deliver the same event multiple times (retry on non-200). Always check if you've already processed a given `txKey` + `transactionStatus` combination before acting.
+Safeheron may deliver the same event multiple times (retry on non-200). Always check if you've already processed a given `txKey` + `transactionStatus` combination before acting, and commit the "processed" marker in the **same DB transaction** as the business side effects (see Step 3) — never insert a dedup row and commit before doing the work, or a failure after that commit loses the event for good.
 
 ### 5. Anti-Dust Attack Filtering for Deposits
 
@@ -389,6 +489,10 @@ switch (eventType) {
         // KYT alert notification — transactions may be marked by aml
         alertOpsTeam("KYT alert notification", event);
         break;
+    case "TOKEN_BLACKLIST_ADDRESS_HIT":
+        // An address in your team was added to a token issuer's blacklist (e.g. Tether) — verify and handle the affected assets
+        alertOpsTeam("Address frozen by token issuer", event);
+        break;
 }
 ```
 
@@ -396,8 +500,10 @@ switch (eventType) {
 
 ## Best Practices
 
-- Return HTTP 200 as fast as possible — offload all processing to a queue/async worker.
+- Return HTTP 200 as fast as possible — but only after the verified event is **durably** stored (DB inbox or durable MQ); never ack after handing off to an in-memory queue or `@Async`.
 - Store the raw encrypted payload in a database before processing, for auditability.
+- Deposits on UTXO coins: credit from `destinationAddressList[]` (address / amount), not only `destinationAddress`.
+- `transactionDirection = INTERNAL_TRANSFER` covers both system transfers (Auto Sweep, gas top-up `AUTO_FUEL`, …) and user withdrawals to another address inside your Safeheron team. Credit a user only for a `NORMAL` internal transfer that matches a platform withdrawal order — see `classifyTransaction` in [BUSINESS_PATTERNS.md](BUSINESS_PATTERNS.md).
 - Implement idempotency by checking `txKey` before acting — Safeheron may deliver duplicates on retry.
 - Schedule a periodic call to `/v1/transactions/one` as a safety net.
 - Auto Sweep (归集), Gas refill, speed-up, and batch transfers all generate standard webhook events.

@@ -2,7 +2,7 @@
 
 ## Overview
 
-Safeheron's Gas Station (Auto Gas Refill) service automatically tops up wallet gas when balances fall below a configured threshold, enabling uninterrupted operations for deposit wallets.
+Safeheron's Gas Service (Auto Gas Refill): when initiating a transaction, Gas Service automatically supplements the Gas fee for wallets where `autoFuel` is `true`, enabling uninterrupted operations for deposit wallets. When Gas Service is enabled and an alert threshold is set, Safeheron sends the `GAS_BALANCE_WARNING` webhook when the Gas balance is below the threshold (see below).
 
 The `GasApi` provides:
 - Query current gas station balance
@@ -31,7 +31,7 @@ Query the current gas balance and auto-refill configuration:
 
 ```typescript
 const resp = await gasApi.gasStatus({
-  networkMode: 'MAINNET',  // optional: filter by network mode
+  networkMode: 'MAINNET',  // MAINNET or TESTNET (optional in the API; required by the SDK v1.0.32 TS type)
 });
 
 // Gas balances per coin
@@ -49,7 +49,7 @@ for (const cfg of resp.configuration) {
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `networkMode` | string | Optional. Filter by network mode. |
+| `networkMode` | string | Network mode: `MAINNET` (mainnet) / `TESTNET` (testnet). Optional in the API, but declared required in SDK v1.0.32's TS type |
 
 ### GasStatusResponse Structure
 
@@ -64,7 +64,7 @@ for (const cfg of resp.configuration) {
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `network` | string | Blockchain network name (Ethereum, TRON, BNB Smart Chain, Arbitrum, Polygon) |
+| `network` | string | Network. Currently supported networks are: Ethereum, TRON, BNB Smart Chain, Arbitrum, Polygon, Solana, Optimism, Base, Avalanche C-Chain, TRON(Shasta), Sepolia |
 | `enabled` | boolean | Whether auto gas refill is enabled for this network |
 
 ---
@@ -109,7 +109,7 @@ for (const detail of resp.detailList) {
 
 ## Webhook -- Gas Balance Warning
 
-When the gas station balance drops below the configured threshold, Safeheron sends a webhook notification:
+When Gas Service is enabled and an alert threshold is set, Safeheron sends a webhook notification when the Gas balance is below the threshold (e.g. first detected during automatic fueling, when the threshold is set or updated, or after a top-up that still leaves it below). It is sent at most once every 30 minutes:
 
 ```
 Event Type: GAS_BALANCE_WARNING
@@ -147,5 +147,6 @@ await accountApi.batchUpdateAccountTag({
 
 - **Gas Station balance is separate from wallet balances** -- top up via Safeheron Console.
 - If auto-refill keeps failing, check: gas station balance, network congestion, and policy configuration.
-- Supported networks for auto gas refill: Ethereum, TRON, BNB Smart Chain, Arbitrum, Polygon.
+- Supported networks for auto gas refill: Ethereum, TRON, BNB Smart Chain, Arbitrum, Polygon, Solana, Optimism, Base, Avalanche C-Chain, TRON(Shasta), Sepolia.
+- `autoFuel` controls whether Gas Service supplements the Gas fee when a transaction is initiated from the wallet — set it per wallet at creation, or in batch with `accountApi.batchUpdateAccountAutofuel` (see [WALLET_API.md](WALLET_API.md#batch-set-auto-fuel)).
 - Gas API queries the team's Gas Station service, not individual wallet gas balances.

@@ -70,54 +70,48 @@ Before configuring scenario policies, define the approval nodes (人员组) you 
 
 ## 5. Scenario: API Co-Signer — Approval Callback Logic
 
-When the API Co-Signer is the approver, it calls your **Approval Callback Service**. Implement rigorous checks:
+When the API Co-Signer is the approver, it calls your **Approval Callback Service**. Start from `CoSignerCallbackController` in [COSIGNER.md](COSIGNER.md) — it already handles callback types, per-`transactionType` business rules and AML/KYT — and add your policy tiers to its `decide()` method, **before** the AML check (so over-limit transactions are rejected immediately instead of waiting for KYT):
 
 ```java
-@PostMapping("/cosigner/callback")
-public Map<String, String> handleCallback(@RequestBody CoSignerCallBackV3 encryptedBody) throws Exception {
-    // 1. Decrypt and verify signature using Co-Signer identity public key — throws on failure
-    CoSignerBizContentV3 bizContent = coSignerConverter.requestV3Convert(encryptedBody);
+// Replaces steps 2–3 at the end of CoSignerCallbackController.decide() (do not keep both copies):
 
-    CoSignerResponseV3 response = new CoSignerResponseV3();
-    response.setApprovalId(bizContent.getApprovalId());
-    response.setAction("REJECT");  // default REJECT
+// 2. Business rules by transactionType (order matching for NORMAL / UTXO_BATCH_TRANSFER, system rules otherwise)
+if (!passesBusinessRules(tx, memo)) {
+    return "REJECT";
+}
 
-    TransactionApproval tx = parseTransactionDetail(bizContent.getDetail());
+// 3. Policy tier — defense in depth: your Safeheron policy should already route large amounts to human
+//    approvers; if one still reaches the Co-Signer, reject it
+if (!isWithinAutoApprovalLimit(tx)) {
+    log.warn("REJECT: amount {} {} exceeds auto-approval limit, txKey={}", tx.getTxAmount(), tx.getCoinKey(), tx.getTxKey());
+    return "REJECT";
+}
 
-    // 2. Verify customerRefId exists in your DB — REJECT unknown transactions
-    WithdrawalOrder order = withdrawalOrderDao.findByCustomerRefId(tx.getCustomerRefId());
-    if (order == null) {
-        log.warn("REJECT: unknown customerRefId {}", tx.getCustomerRefId());
-        return coSignerConverter.responseV3Converter(response);
+// 4. AML / KYT — only LOW / MEDIUM pass; waits (neither APPROVE nor REJECT) while screening is unfinished
+AmlDecision amlDecision = evaluateAml(bizContent.getApprovalId(), tx);
+if (amlDecision == AmlDecision.WAIT) {
+    return ACTION_WAIT;
+}
+return amlDecision == AmlDecision.PASS ? "APPROVE" : "REJECT";
+```
+
+```java
+// Limits are per coin, in the coin's own unit — never compare raw amounts of different coins against one number
+private static final Map<String, BigDecimal> AUTO_APPROVAL_LIMITS = Map.of(
+        "ETHEREUM_ETH", new BigDecimal("10"),
+        "USDT(ERC20)_ETHEREUM_USDT", new BigDecimal("50000"));
+
+private boolean isWithinAutoApprovalLimit(TransactionApproval tx) {
+    BigDecimal limit = tx.getCoinKey() == null ? null : AUTO_APPROVAL_LIMITS.get(tx.getCoinKey());
+    if (limit == null || tx.getTxAmount() == null) {
+        return false;   // unknown coin or missing amount — fail closed
     }
-
-    // 3. Verify amount matches what the user requested
-    if (new BigDecimal(tx.getTxAmount()).compareTo(order.getExpectedAmount()) != 0) {
-        log.warn("REJECT: amount mismatch for {}", tx.getCustomerRefId());
-        return coSignerConverter.responseV3Converter(response);
+    try {
+        BigDecimal amount = new BigDecimal(tx.getTxAmount());
+        return amount.signum() >= 0 && amount.compareTo(limit) <= 0;
+    } catch (NumberFormatException e) {
+        return false;
     }
-
-    // 4. Verify destination address matches
-    if (!tx.getDestinationAddress().equals(order.getDestinationAddress())) {
-        log.warn("REJECT: destination mismatch for {}", tx.getCustomerRefId());
-        return coSignerConverter.responseV3Converter(response);
-    }
-
-    // 5. Check AML risk
-    for (TransactionApproval.Aml aml : tx.getAmlList()) {
-        if ("HIGH".equalsIgnoreCase(aml.getRiskLevel()) || "SEVERE".equalsIgnoreCase(aml.getRiskLevel())) {
-            return coSignerConverter.responseV3Converter(response);
-        }
-    }
-
-    // 6. Check amount within auto-approval limit
-    if (new BigDecimal(tx.getTxAmount()).compareTo(AUTO_APPROVAL_LIMIT) > 0) {
-        return coSignerConverter.responseV3Converter(response);
-    }
-
-    // 7. All checks passed — approve
-    response.setAction("APPROVE");
-    return coSignerConverter.responseV3Converter(response);
 }
 ```
 
@@ -133,7 +127,7 @@ After configuring all policies, simulate attacks to verify the policies hold:
 |----------------|----------------|
 | API Key sends to an address NOT in the whitelist | Transaction blocked by policy |
 | API Key initiates from a wallet it's not authorized to use as source | Transaction blocked by policy |
-| Withdrawal amount exceeds the per-tx auto-approval threshold | Escalated to Ops Team for manual review (not auto-approved) |
+| Withdrawal amount exceeds the per-tx auto-approval threshold | Routed by policy to the Ops Team for manual review; the Co-Signer callback rejects it if it ever reaches it |
 | 24H cumulative total exceeds limit within a single day | Escalated to higher approval tier |
 | Transaction with no matching policy | Blocked; `NO_MATCHING_TRANSACTION_POLICY` webhook fires |
 

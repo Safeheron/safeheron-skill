@@ -25,7 +25,7 @@ Wallet Account 1          Wallet Account 2          Wallet Account ...
 |-----------|-----------|---------|
 | `INFLOW` | External -> team wallet | User deposit |
 | `OUTFLOW` | Team wallet -> external | User withdrawal |
-| `INTERNAL_TRANSFER` | Team wallet -> team wallet | Consolidation, gas top-up |
+| `INTERNAL_TRANSFER` | Team wallet -> team wallet (source and destination are both `VAULT_ACCOUNT`) | Consolidation, gas top-up (`AUTO_FUEL`), and a user withdrawing to another user's deposit address on your platform. **Only a `NORMAL` internal transfer that matches one of your withdrawal orders is ever credited** — see `classify_transaction` below |
 
 ---
 
@@ -69,35 +69,74 @@ Use **Webhook as primary + REST API polling as fallback**. Never rely on only on
 
 ### 3-1. Webhook -- Primary Path
 
-Subscribe to `TRANSACTION_STATUS_CHANGED`. Filter for deposit (inflow) transactions:
+Subscribe to `TRANSACTION_STATUS_CHANGED`. Decide what each transaction does with ONE classification function shared by the webhook handler and the polling job (3-2):
 
 ```python
+# Module level: one classification rule shared by the webhook handler AND the polling job below.
+IGNORE = 'IGNORE'
+CREDIT_DEPOSIT = 'CREDIT_DEPOSIT'
+SETTLE_WITHDRAWAL_AND_CREDIT_RECEIVER = 'SETTLE_WITHDRAWAL_AND_CREDIT_RECEIVER'
+
+
+def classify_transaction(tx):
+    # Anything but NORMAL is a system / ops movement, never a user deposit: AUTO_FUEL (Auto Sweep gas top-up of a
+    # deposit address, vault -> vault = INTERNAL_TRANSFER), AUTO_SWEEP, UTXO_COLLECTION, GAS_SERVICE_DEPOSIT,
+    # GAS_SERVICE_FUEL, BOUNCED_TRANSFER, ABNORMAL, UTXO_BATCH_TRANSFER, ...
+    if tx.get('transactionType') != 'NORMAL':
+        return IGNORE
+    direction = tx.get('transactionDirection')
+    if direction == 'INFLOW':
+        return CREDIT_DEPOSIT
+    if direction == 'INTERNAL_TRANSFER':
+        # Only a transfer created by one of YOUR withdrawal orders (user A -> user B's deposit address) is credited;
+        # any other internal transfer (hot -> cold, manual consolidation, ...) is not a deposit.
+        order = find_withdrawal_order(tx.get('txKey'), tx.get('customerRefId'))  # placeholder: your order store
+        return SETTLE_WITHDRAWAL_AND_CREDIT_RECEIVER if order is not None else IGNORE
+    return IGNORE  # OUTFLOW: handled by the withdrawal flow (section 5), never credited
+
+
 # In your webhook handler:
 event_type = biz_content.get('eventType')
 if event_type != 'TRANSACTION_STATUS_CHANGED':
     return
 
-tx_type = biz_content.get('transactionType')       # "NORMAL"
-tx_direction = biz_content.get('transactionDirection')  # "INFLOW"
-status = biz_content.get('transactionStatus')
+event_detail = biz_content.get('eventDetail') or {}  # business fields live under eventDetail
+action = classify_transaction(event_detail)
+if action == CREDIT_DEPOSIT:
+    handle_deposit_status_change(event_detail)        # credit only on COMPLETED, idempotent by txKey
+elif action == SETTLE_WITHDRAWAL_AND_CREDIT_RECEIVER:
+    handle_internal_withdrawal(event_detail)          # settle the withdrawal order + credit receiver on COMPLETED
+# IGNORE: system / ops movements (AUTO_FUEL, AUTO_SWEEP, UTXO_COLLECTION, ...) -- never credited
 
-if tx_type == 'NORMAL' and tx_direction == 'INFLOW':
-    handle_deposit_status_change(biz_content)
+
+def handle_internal_withdrawal(event_detail):
+    """Settle the matching withdrawal order (same rules as section 5) and, on COMPLETED, credit each output whose
+    address is a user deposit address on your platform -- in ONE DB transaction, idempotent by txKey."""
+    ...  # placeholder: settle_withdrawal(event_detail) + credit outputs via find_user_by_deposit_address(...)
+
+
+def deposit_outputs(event_detail):
+    """(address, amount) pairs credited by this transaction. UTXO coins (BTC, LTC, DOGE, ...) put them in
+    destinationAddressList; destinationAddress is not populated for UTXO coins."""
+    outputs = event_detail.get('destinationAddressList') or []
+    if outputs:
+        return [(o.get('address'), o.get('amount')) for o in outputs]
+    return [(event_detail.get('destinationAddress'), event_detail.get('txAmount'))]
 ```
 
 **Status progression for inflow transactions:**
 
 | Status | Meaning | Action |
 |--------|---------|--------|
-| `BROADCASTING` | On-chain, 0 confirmations | Optionally show "pending" to user |
+| `BROADCASTING` | On-chain, 0 confirmations (incoming: **Bitcoin only** — other chains skip this state) | Optionally show "pending" to user |
 | `CONFIRMING` | >=1 confirmation | Optionally show confirmation count |
 | `COMPLETED` | >=N confirmations (Safeheron default) | **Credit user account** |
 | `FAILED` | Failed on-chain | No credit |
 
 **Critical rules:**
-- Return HTTP 200 **immediately** before any processing
+- Verify the signature and **durably store** the event (DB inbox / durable MQ), then ack `{"code":"200","message":"SUCCESS"}` -- do the business processing asynchronously from that store (see [WEBHOOK.md](WEBHOOK.md))
 - **Never roll back status** -- if DB already has `COMPLETED`, ignore a late `CONFIRMING` event
-- Implement **idempotency by `txKey`**
+- Implement **idempotency by `txKey`** and commit it in the **same DB transaction** as the credit -- never commit a dedup row first and credit afterwards
 
 **Anti-dust attack:** Configure a minimum deposit amount and ignore events below that threshold.
 
@@ -117,8 +156,14 @@ param.transactionStatus = "COMPLETED"
 
 tx_list = transaction_api.list_transactions_v2(param)
 for tx in tx_list:
-    if tx.get('transactionDirection') == 'INFLOW' and tx.get('transactionStatus') == 'COMPLETED':
-        credit_user_if_not_already(tx['txKey'], tx)
+    if tx.get('transactionStatus') != 'COMPLETED':
+        continue
+    action = classify_transaction(tx)                  # same rule as the webhook path
+    if action == CREDIT_DEPOSIT:
+        credit_user_if_not_already(tx['txKey'], tx)    # idempotent by txKey (webhook may have credited it already)
+    elif action == SETTLE_WITHDRAWAL_AND_CREDIT_RECEIVER:
+        handle_internal_withdrawal(tx)                 # also idempotent by txKey
+    # IGNORE: AUTO_FUEL / AUTO_SWEEP / UTXO_COLLECTION / ops transfers -- never credited
 ```
 
 ---
@@ -216,9 +261,10 @@ except Exception as e:
 
 ```python
 # In webhook handler for TRANSACTION_STATUS_CHANGED
-tx_key = biz_content.get('txKey')
-customer_ref_id = biz_content.get('customerRefId')
-new_status = biz_content.get('transactionStatus')
+event_detail = biz_content.get('eventDetail') or {}  # business fields live under eventDetail
+tx_key = event_detail.get('txKey')
+customer_ref_id = event_detail.get('customerRefId')
+new_status = event_detail.get('transactionStatus')
 
 order = find_order_by_tx_key_or_ref_id(tx_key, customer_ref_id)
 if order is None:
@@ -226,6 +272,11 @@ if order is None:
 
 # Never roll back status
 if is_terminal_status(order['status']):
+    return
+
+# Speed-up: the original tx ends FAILED while its replacement may still complete — keep the order open and let the replacement decide
+# (check BEFORE moving the order to a terminal state, otherwise the replacement's COMPLETED event is discarded)
+if new_status in ('FAILED', 'REJECTED', 'CANCELLED') and has_active_replacement(order, tx_key):
     return
 
 update_order_status(order['id'], new_status)
@@ -260,14 +311,16 @@ from safeheron_api_sdk_python.api.transaction_api import RecreateTransactionRequ
 
 param = RecreateTransactionRequest()
 param.txKey = stuck_tx_key
+param.txHash = stuck_tx_hash   # on-chain hash of the stuck transaction
+param.coinKey = coin_key
 param.txFeeLevel = "HIGH"
 
 resp = transaction_api.recreate_transactions(param)
 new_tx_key = resp['txKey']
 ```
 
-Chains that support speed-up: all EVM chains, BTC, BCH, DASH, LTC, DOGE, FIL, Aptos, CFX.
-Chains that do NOT support speed-up: NEAR, SUI, TRON, SOL, TON.
+Chains that support speed-up: EVM chains (ETH, ETC, BSC, MATIC, etc.), Bitcoin and Dogecoin (RBF and CPFP) and other UTXO chains supporting CPFP, Filecoin, Aptos, XRP Ledger.
+Chains that do NOT support speed-up (not listed in the published docs as supported): NEAR, SUI, TRON, SOL, TON.
 
 ---
 
@@ -275,13 +328,12 @@ Chains that do NOT support speed-up: NEAR, SUI, TRON, SOL, TON.
 
 ### At withdrawal time:
 - Run destination address through your internal risk engine
-- Optionally use KYA address screening via `ComplianceApi` -- see [COMPLIANCE_API.md](COMPLIANCE_API.md)
+- Screen the destination address with **KYA** (`ComplianceApi.create_kya_screening` -> poll `kya_screening_one`) -- see [COMPLIANCE_API.md](COMPLIANCE_API.md). Do **not** use the deprecated AML Checker (`/v1/tools/aml-checker/*`, `ToolsApi.aml_checker_request` / `aml_checker_retrieves`), and `checkAml` in `check_coin_address` is not a substitute for KYA
+- Reject withdrawals to `HIGH` / `SEVERE` (and, by default, `UNKNOWN`) risk addresses before they reach Safeheron
 
 ### In the Approval Callback Service (Co-Signer):
 
-```python
-# Check AML risk in callback
-for aml in customer_content.get('amlList', []):
-    if aml.get('riskLevel', '').upper() == 'HIGH':
-        return "REJECT"
-```
+Use `evaluate_aml(approval_id, tx)` in the Flask callback service ([COSIGNER.md](COSIGNER.md#aml--kyt-handling-in-the-callback)):
+- Only `riskLevel` `LOW` / `MEDIUM` pass by default -- `HIGH`, `SEVERE`, `UNKNOWN` and unexpected values are rejected
+- While `amlScreeningTriggeredState = IN_PROGRESS` or any `status = PENDING`, return neither APPROVE nor REJECT (Co-Signer retries every 5s); fall back to reject / manual review ~5 min after the first callback for that approval
+- `status = FAILED`, a missing / unknown status, or `TRIGGERED` with an empty `amlList` -> reject and alert
